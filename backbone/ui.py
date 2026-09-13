@@ -16,6 +16,7 @@ import signal
 import sys
 import time as _time
 import unicodedata
+from pathlib import Path
 from typing import Any
 
 from .nav import NAV_STACK
@@ -77,12 +78,29 @@ def spinner(frame: int) -> str:
     return SPIN[frame % len(SPIN)]
 
 
-def content_width(min_width: int = 70) -> int:
+def content_width(min_width: int = 1) -> int:
     """Terminal columns available for content, after the global left+right
     margin - the width every box/bar in a frame should be drawn against.
+
+    No artificial floor beyond `min_width` (default 1, i.e. effectively
+    none) - matching backtrack's own _cols(): content is always sized
+    against the TRUE current width, however narrow. A floor pitched above
+    the real terminal width would size content for space that doesn't
+    exist; a caller's later hard safety-clip against the true width (see
+    watch.py's render()) would then cut that oversized content apart
+    mid-render - border corners and all - instead of letting it degrade
+    gracefully the way the per-field truncation is meant to.
+
+    Routed through get_terminal_width() (below) - the one cached,
+    SIGWINCH-invalidated source of truth for the terminal's size the whole
+    suite reads from, same as every prompt widget. Safe for a live,
+    tick-driven view specifically because such a view should be driven
+    through run_dashboard() (prompt_core.py), which checks consume_resize()
+    every tick and forces a hard clear-and-redraw the instant a resize
+    lands - the same pattern every other screen in the suite uses, not a
+    bespoke one-off.
     """
-    cols = shutil.get_terminal_size((100, 24)).columns
-    return max(cols, min_width) - 2 * MARGIN_H
+    return max(min_width, get_terminal_width() - 2 * MARGIN_H)
 
 
 def rule(n: int) -> str:
@@ -102,6 +120,41 @@ def bar(pct: int, width: int, color: str = "") -> str:
     return out
 
 
+def rate_of_change(history: list, now: float, value: float, window: float = 20.0, max_len: int = 60):
+    """Tracks `value` over time in `history` (a list of (ts, value) pairs,
+    mutated in place and capped to `max_len` entries) and returns its rate
+    of change per second over the last `window` seconds - None until
+    `window` seconds of history has accumulated (not yet measurable), so a
+    caller can show "measuring" instead of a misleadingly noisy early rate.
+    """
+    history.append((now, value))
+    del history[:-max_len]
+    base_ts = base_val = None
+    for ts, v in history:
+        if ts >= now - window:
+            base_ts, base_val = ts, v
+            break
+    if base_ts is None or now - base_ts <= 0:
+        return None
+    return (value - base_val) / (now - base_ts)
+
+
+def sparkline(rate_history: list, rate: float, max_len: int = 14) -> str:
+    """Appends `rate` to `rate_history` (mutated in place, capped to
+    `max_len`) and renders it as an 8-level sparkline (SPARK), scaled to the
+    largest rate currently in the window.
+
+    Deliberately a separate rendering from bar(): a bar is a fraction of a
+    whole (how full), a sparkline is a trend over time (how fast, lately) -
+    conflating the two by drawing both the same way reads as one number
+    doubled, not two.
+    """
+    rate_history.append(rate)
+    del rate_history[:-max_len]
+    mx = max(rate_history, default=1) or 1
+    return "".join(SPARK[max(0, min(7, int(r / mx * 7.99)))] for r in rate_history)
+
+
 def header_box(left: str, right: str, cols: int, spin: str = "") -> list:
     """The 3-line rounded header frame (top rule, title row, bottom rule)
     for a live view - `cols` is total frame width, i.e. content_width()'s
@@ -110,22 +163,38 @@ def header_box(left: str, right: str, cols: int, spin: str = "") -> list:
     exactly under the corners no matter how any of the three are sized -
     this single spot is the only place that math needs to be right.
 
-    ponytail: no clipping - if len(left)+len(right)+len(spin) exceeds
-    cols-2 the row runs long and the border stops lining up. Keep the
-    pieces short for the terminal width you support, or add truncation
-    here if a caller ever needs to survive a narrow terminal unattended.
+    Truncates `left` (then `right`, if even that isn't enough) so the row
+    never runs past `cols` regardless of terminal width - `right` (typically
+    a short, fixed-format clock) is kept whole for as long as it can be;
+    `left` (the variable, more compressible piece - a title/library name)
+    gives way first.
+
+    Bakes in its own MARGIN_H left indent (matching every hand-written
+    widget line in prompt.py/prompt_core.py - e.g. confirm()'s
+    f"  {message}") rather than relying on a wrapper to add it: a caller
+    driving its view through _Widget.render() (prompt_core.py) gets no
+    such wrapper, since _Widget only manages the vertical margin itself.
     """
     interior = cols - 2
-    pad = max(1, interior - len(left) - len(right) - len(spin))
+    # Reserve the spinner plus one pad column *before* sizing left/right, so
+    # truncating to fit `budget` always leaves room for pad >= 1 - flooring
+    # pad afterward instead (max(1, ...)) can push the row a column past the
+    # border once left+right already exactly fill the interior.
+    budget = max(0, interior - len(spin) - 1)
+    if visual_len(left) + visual_len(right) > budget:
+        right = truncate_text(right, min(visual_len(right), budget))
+        left = truncate_text(left, max(0, budget - visual_len(right)))
+    pad = max(0, interior - visual_len(left) - visual_len(right) - len(spin))
     C = Colors
+    hpad = " " * MARGIN_H
     return [
-        f"{C.FRAME}╭{rule(interior)}╮{C.R}",
-        f"{C.FRAME}│{C.B}{left}{C.R}{' ' * pad}{C.TXT}{right}{C.R}{spin}{C.FRAME}│{C.R}",
-        f"{C.FRAME}╰{rule(interior)}╯{C.R}",
+        f"{hpad}{C.FRAME}╭{rule(interior)}╮{C.R}",
+        f"{hpad}{C.FRAME}│{C.B}{left}{C.R}{' ' * pad}{C.TXT}{right}{C.R}{spin}{C.FRAME}│{C.R}",
+        f"{hpad}{C.FRAME}╰{rule(interior)}╯{C.R}",
     ]
 
 
-def wrap_margins(lines: list) -> str:
+def wrap_margins(lines: list, width: int = None) -> str:
     """Applies the global MARGIN_H/MARGIN_V inset plus per-line
     clear-to-end-of-line, ready for one `sys.stdout.write` - the standard
     back* frame render (pair with an `ESC[H` cursor-home beforehand).
@@ -135,7 +204,15 @@ def wrap_margins(lines: list) -> str:
     stops translating a bare \\n into a carriage return - every line after
     the first would otherwise start wherever the previous one ended instead
     of column 1.
+
+    `width` (typically content_width()'s return value), if given, clips
+    every line to it first - a safety net so one field a caller forgot to
+    size itself can't overflow the whole frame. Hand-tuned per-field
+    truncation still reads better (an ellipsis where it makes sense, not a
+    hard cut mid-word); this is the guarantee behind it, not a replacement.
     """
+    if width is not None:
+        lines = [clip_ansi(line, width) for line in lines]
     hpad = " " * MARGIN_H
     vpad = ["\033[K"] * MARGIN_V
     out = vpad + [hpad + line + "\033[K" for line in lines] + vpad
@@ -578,6 +655,25 @@ def plural(n: int, singular: str, many: str = None) -> str:
     return f"{n} {singular if abs(n) == 1 else (many or singular + 's')}"
 
 
+def human_gb(kb: float) -> str:
+    """`kb` (kilobytes) as a one-decimal GB string, e.g. "3.5"."""
+    return f"{kb / 1048576:.1f}"
+
+
+def dir_size_kb(path) -> int:
+    """Total size of every file under `path`, in KB (0 if it doesn't exist)."""
+    path = Path(path)
+    total = 0
+    if path.exists():
+        for f in path.rglob("*"):
+            if f.is_file():
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    pass
+    return total // 1024
+
+
 _ANSI_DEMO = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 
 
@@ -591,6 +687,13 @@ def _demo() -> None:
             top, mid, bot = header_box(left, right, cols, spin)
             widths = {len(strip_ansi(top)), len(strip_ansi(mid)), len(strip_ansi(bot))}
             assert len(widths) == 1, (cols, left, right, spin, widths)
+    # A left piece far longer than the frame must truncate, not overflow -
+    # the border still lines up at a width too narrow for it whole.
+    for cols in (10, 20, 40):
+        top, mid, bot = header_box("a" * 200, "12:00:00  ", cols, "X")
+        widths = {len(strip_ansi(top)), len(strip_ansi(mid)), len(strip_ansi(bot))}
+        assert len(widths) == 1, (cols, widths)
+        assert len(strip_ansi(mid)) == cols + MARGIN_H, (cols, len(strip_ansi(mid)))
     assert visual_len("plain") == 5
     assert visual_len(f"{Colors.BOLD}x{Colors.RESET}") == 1
     assert truncate_text("abcdefgh", 4) == "abc…"
@@ -599,6 +702,18 @@ def _demo() -> None:
     # terminal mode (OPOST cleared) a bare \n never returns to column 1, and
     # every line after the first starts wherever the previous one ended.
     assert "\r\n" in wrap_margins(["a", "b"])
+    # wrap_margins(width=...) must clip an oversized line rather than let it
+    # overflow - the safety net behind every tool's own per-field sizing.
+    clipped = wrap_margins(["a" * 200], width=10).split("\r\n")[1]
+    assert len(strip_ansi(clipped)) <= 10 + MARGIN_H, clipped
+    assert human_gb(1048576) == "1.0"
+    hist = []
+    assert rate_of_change(hist, 0.0, 0) is None            # first sample - no window yet
+    assert rate_of_change(hist, 10.0, 1024 * 10) == 1024.0  # 10240 KB over 10s = 1024 KB/s
+    rh = []
+    spark1 = sparkline(rh, 10.0)
+    spark2 = sparkline(rh, 20.0)
+    assert len(spark1) == 1 and len(spark2) == 2
     print("backbone.ui self-check OK")
 
 

@@ -1393,3 +1393,82 @@ def _demo() -> None:
 
 if __name__ == "__main__":
     _demo()
+
+
+def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=None,
+                  poll: float = 0.05, on_key=None) -> None:
+    """Drives a live, tick-driven terminal dashboard through the exact same
+    machinery every select()/confirm()/etc. widget in this module uses -
+    not a bespoke one-off. Every back* tool's own live view (backcrack's
+    `watch`, say) used to hand-roll a full-rewrite-every-tick loop; this
+    drives a _Widget instead, so a resize is handled the way the rest of
+    the suite handles it (`if ui_utils.consume_resize(): ui_utils.clear_screen();
+    w.anchor_reset()` - one hard clear-and-redraw, then back to the normal
+    diffed paint) and an unchanged tick costs nothing extra.
+
+    `interval` and `poll` are deliberately separate: `render()` (a rescan of
+    discs, a subprocess call, whatever `interval` is meant to pace) only
+    runs once every `interval` seconds, but resize/keypress are checked
+    every `poll` seconds (default 0.05s, matching every other widget in this
+    module) regardless - tying both to `interval` (a dashboard's own data-
+    refresh cadence, often 1s+) is what used to make a resize or a 'q'
+    take up to a whole `interval` to register. A resize always forces an
+    immediate render at the new size, whichever cadence it lands between.
+
+    `render()` takes no arguments and returns the frame as a plain list of
+    lines, each already carrying its own left-margin indent (the same
+    convention every hand-written widget line uses - see header_box()).
+    `on_quit()`, if given, runs after the terminal is restored to normal
+    (cursor back, raw mode undone) - the natural place for a "stop the
+    background work too?" confirm().
+
+    `on_key(key)`, if given, is called for any keypress other than
+    `quit_key` (e.g. "s" for a settings screen). It's free to call
+    select()/text()/confirm() etc. itself - each of those widgets manages
+    its own raw mode and screen takeover, so nesting one inside here just
+    works. The dashboard forces a full clear-and-redraw right after it
+    returns, the same way a resize does, since on_key's widget almost
+    certainly left the screen in a different state.
+
+    Not a tty (piped output, a redirected log): renders on a plain
+    time.sleep(interval) loop instead and never checks for `quit_key` -
+    there is no key to read, so the caller must be killed externally, same
+    as the daemons it may be watching.
+    """
+    fd = sys.stdin.fileno()
+    is_tty = sys.stdin.isatty()
+    old_settings = _get_term_attrs(fd) if is_tty else None
+    if is_tty:
+        _set_raw(fd)
+
+    w = _Widget(fd)
+    screen_takeover_next()
+    last_render = 0.0
+    try:
+        while True:
+            resized = ui_utils.consume_resize()
+            if resized:
+                ui_utils.clear_screen()
+                w.anchor_reset()
+            now = time.monotonic()
+            if resized or now - last_render >= interval:
+                w.render(render())
+                last_render = now
+            if is_tty:
+                if _wait_for_keypress(poll):
+                    key = _read_key(fd)
+                    if key == quit_key:
+                        break
+                    if on_key is not None:
+                        on_key(key)
+                        ui_utils.clear_screen()
+                        w.anchor_reset()
+            else:
+                time.sleep(interval)
+    finally:
+        if is_tty:
+            _restore_term_attrs(fd, old_settings)
+        sys.stdout.write("\033[?25h\n")
+
+    if on_quit is not None:
+        on_quit()
