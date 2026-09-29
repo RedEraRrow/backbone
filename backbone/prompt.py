@@ -68,10 +68,10 @@ _toggle_carry: str | None = None   # in-progress text buffer handed across a Ctr
 # the footer box is showing. Ctrl-O opens the host's player view; Ctrl-P/N/B are
 # transport. They do nothing until a host registers set_player_opener /
 # set_transport_handler, so backbone needs no playback code of its own.
-_PLAYER_KEY    = '\x0f'            # Ctrl-O — open the full player view
-_PLAYPAUSE_KEY = '\x10'           # Ctrl-P — play / pause
-_NEXT_KEY      = '\x0e'           # Ctrl-N — next track
-_PREV_KEY      = '\x02'           # Ctrl-B — previous track
+_PLAYER_KEY    = '\x0f'            # Ctrl-O: open the full player view
+_PLAYPAUSE_KEY = '\x10'           # Ctrl-P: play / pause
+_NEXT_KEY      = '\x0e'           # Ctrl-N: next track
+_PREV_KEY      = '\x02'           # Ctrl-B: previous track
 _player_opener = None
 _transport_handler = None
 
@@ -99,7 +99,7 @@ def chrome_hint_pairs(pairs) -> list:
 
     Only keys that will actually do something are advertised: the transport trio
     needs a handler installed and ^O needs a player to reopen. `unboxed` covers
-    a terminal too narrow to draw the now-playing box — the keys are still live,
+    a terminal too narrow to draw the now-playing box: the keys are still live,
     so they are still listed.
     """
     items = list(pairs.items()) if isinstance(pairs, dict) else [tuple(p) for p in pairs]
@@ -112,7 +112,7 @@ def chrome_hint_pairs(pairs) -> list:
 
 
 def chrome_hint_lines(pairs, *, extra: str = "") -> list:
-    """The hint bar as rendered lines — widgets that size a viewport need the
+    """The hint bar as rendered lines, for widgets that size a viewport need the
     row count before they lay their content out."""
     return _hint(*chrome_hint_pairs(pairs), extra=extra).splitlines()
 
@@ -123,7 +123,7 @@ def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
 
     Pads down to :func:`_hint_pin_target` so the bar sits just above the
     miniplayer + status bar and its keys keep the same screen position across
-    redraws — otherwise a repeated click chases the bar as the content changes
+    redraws; otherwise a repeated click chases the bar as the content changes
     height. Records each bright key's screen cell in `cells` for
     :func:`consume_chrome` to look up.
     """
@@ -279,7 +279,7 @@ def select(message: str, choices: list, *,
 
     Args:
         message:    Prompt label shown above the list.
-        choices:    Items — str, dict, or Choice objects.
+        choices:    Items: str, dict, or Choice objects.
         header:     Optional lines rendered above the prompt.
         extra_hints: Extra key→action bindings merged into the hint bar.
         index:      Initial cursor position.
@@ -294,7 +294,7 @@ def select(message: str, choices: list, *,
         inspect_key: Key that triggers `on_inspect` (default 'd').
         row_actions: key→callback(current row value) map. Pressing the key runs
             the callback against the highlighted row and stays in the list (like
-            on_inspect, but any number of keys) — e.g. queue the current track.
+            on_inspect, but any number of keys), e.g. queue the current track.
         row_action_hints: key→label map surfaced in the hint bar for row_actions.
         row_edit:   row value → the values `row_edit_key` cycles that row through,
             its current one first. Each press steps to the next, and one step past
@@ -306,7 +306,7 @@ def select(message: str, choices: list, *,
         row_edit_col: which cell of the row the editing happens in.
         row_edit_key: the key that opens the cycle and advances it (default 'e').
         allow_back: when False, the cancel keys (←/b/h/Esc) are ignored so the
-            list can only move forward (Enter) or quit (q) — used for top-level
+            list can only move forward (Enter) or quit (q), used for top-level
             menus that have nowhere to go back to.
     """
     items = _norm(choices)
@@ -384,7 +384,7 @@ def select(message: str, choices: list, *,
 
     # Inline row edit (opt-in, see row_edit): the cycle sits at _edit_i over
     # _edit_opts, with one position past the end being the text field. While
-    # typing, every key belongs to the buffer — including 'q' and the cycle key
+    # typing, every key belongs to the buffer, including 'q' and the cycle key
     # itself, which is why leaving the field is ↑↓/↵/Esc and nothing else.
     _edit_on    = False
     _edit_opts: list = []
@@ -409,7 +409,7 @@ def select(message: str, choices: list, *,
         """The row's printed characters, one entry per *terminal column*.
 
         A two-cell glyph is repeated so that an index into the result is the
-        column it sits in — which is what the click hit-test below assumes when
+        column it sits in, which is what the click hit-test below assumes when
         it asks whether column `col` holds a character or blank padding.
         """
         return "".join(ch * ui_utils.char_cols(ch) for ch in ui_utils.display_text(s))
@@ -425,7 +425,7 @@ def select(message: str, choices: list, *,
 
     def _edit_cell() -> list:
         """The cell under edit, as styled segments: a cycled option, or the live
-        text field. Segments rather than raw ANSI — the table measures a cell by
+        text field. Segments rather than raw ANSI: the table measures a cell by
         the length of its text, so escape codes inside one would be counted as
         visible and the cell truncated to nothing."""
         if not _editing_text():
@@ -442,7 +442,7 @@ def select(message: str, choices: list, *,
         nonlocal viewport
         cols    = _cols()
         # Refresh the now-playing box height up front so this frame's row budget
-        # (vis) and hint pinning match the box that render() will actually draw —
+        # (vis) and hint pinning match the box that render() will actually draw;
         # otherwise a just-appeared box paints over the pinned hints until the
         # next redraw (hints missing until you click/navigate).
         ui_utils.footer_lines(ui_utils.get_terminal_width())
@@ -459,10 +459,10 @@ def select(message: str, choices: list, *,
         layout_constraint = " " * max_header_w if (0 < max_header_w < cols - 20) else ""
 
         # The transport keys are surfaced here whenever background audio is
-        # playing (recomputed each render so they appear/vanish live) — see
+        # playing (recomputed each render so they appear/vanish live); see
         # `chrome_hint_pairs`.
         # One source for both the row budget below and the bar actually painted
-        # at the end of this function — they must agree or the list mis-sizes.
+        # at the end of this function: they must agree or the list mis-sizes.
         hints_now  = _edit_hints if _edit_on else combined_hints
         hint_lines = chrome_hint_lines(hints_now, extra=layout_constraint)
 
@@ -477,8 +477,8 @@ def select(message: str, choices: list, *,
         elif cursor >= viewport + vis:
             viewport = cursor - vis + 1
         # Growing the window (or deleting rows) leaves the viewport further down
-        # than it needs to be — the list stayed scrolled, showing "N above" with
-        # blank space below, until you navigated. Pull it back so the last row of
+        # than it needs to be, leaving the list scrolled with "N above" and
+        # blank space below. Pull it back so the last row of
         # the list sits on the last visible row at most.
         viewport = max(0, min(viewport, n - vis))
 
@@ -527,7 +527,7 @@ def select(message: str, choices: list, *,
                 label = label[:max_w - 1] + "…"
             if multi:
                 if items[i].disabled and not items[i].checked:
-                    # Dimmed (interlocked) — not selectable
+                    # Dimmed (interlocked): not selectable
                     out.append(f"   {C.DIM}• {label}{C.RESET}")
                 elif i == cursor:
                     glyph = f"{C.GREEN}✔{C.RESET}" if items[i].checked else f"{C.DIM}•{C.RESET}"
@@ -536,7 +536,7 @@ def select(message: str, choices: list, *,
                     glyph = f"{C.GREEN}✔{C.RESET}" if items[i].checked else f"{C.DIM}•{C.RESET}"
                     out.append(f"    {glyph} {C.DIM}{label}{C.RESET}")
             elif items[i].disabled:
-                # Section heading / separator — dim, no pointer, slightly outdented.
+                # Section heading / separator: dim, no pointer, slightly outdented.
                 out.append(f"  {C.DIM}{C.BOLD}{label}{C.RESET}" if label else "")
             elif i == cursor:
                 out.append(f"  {C.ACCENT}›{C.RESET} {C.PRIMARY}{C.BOLD}{label}{C.RESET}")
@@ -643,7 +643,7 @@ def select(message: str, choices: list, *,
             elif key == 'FOCUS_IN':
                 # Regained focus: repaint fully in case a background track change
                 # (or the terminal not painting us while unfocused) left the list
-                # or now-playing box stale — no click needed. A refresh, not
+                # or now-playing box stale, no click needed. A refresh, not
                 # a clear: the layout is still valid, so blanking the screen first
                 # would just flash.
                 _sel_last_click = None; w.refresh(); w.render(_lines())
@@ -682,7 +682,7 @@ def select(message: str, choices: list, *,
             elif key in ('LEFT', 'b', 'ESC'):
                 if allow_back:
                     result = None; break
-                # Top-level menu: no back/cancel — only forward or quit.
+                # Top-level menu: no back/cancel, only forward or quit.
             elif key in ('q', 'Q'):              raise QuitToTerminal()
             elif on_inspect is not None and key == inspect_key and not items[cursor].disabled:
                 # Inspect the current row (e.g. a full detail view) without
@@ -698,7 +698,7 @@ def select(message: str, choices: list, *,
                 w.render(_lines())
             elif row_actions and key in row_actions and not items[cursor].disabled:
                 # Act on the highlighted row (e.g. queue this track) and stay in
-                # the list — the callback shows its own status; we just redraw.
+                # the list. The callback shows its own status; we just redraw.
                 row_actions[key](items[cursor].value)
                 _sel_last_click = None
                 w.render(_lines())
@@ -736,7 +736,7 @@ def select(message: str, choices: list, *,
                 # A click only confirms/toggles when it lands on a printed
                 # character; clicking the blank space anywhere in a row (trailing
                 # padding, gaps between table columns, the empty left margin) just
-                # moves the highlight — it never enters.
+                # moves the highlight; it never enters.
                 row_plain = _row_plain.get(idx, "")
                 on_char = 0 < col <= len(row_plain) and row_plain[col - 1] != ' '
                 if not on_char:
@@ -758,7 +758,7 @@ def select(message: str, choices: list, *,
                     w.render(_lines())
                 elif not multi and clickable:
                     if idx == cursor or _sel_last_click == idx:
-                        # Already on this item (keyboard or prior click) — confirm
+                        # Already on this item (keyboard or prior click): confirm
                         cursor = idx
                         result = items[cursor].value
                         break
@@ -767,7 +767,7 @@ def select(message: str, choices: list, *,
                         cursor = idx
                         w.render(_lines())
                 elif not multi:
-                    # Disabled/heading row — move cursor, reset click state
+                    # Disabled/heading row: move cursor, reset click state
                     _sel_last_click = None
                     cursor = idx
                     w.render(_lines())
@@ -845,7 +845,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
     def _owners() -> list[int]:
         """Per row, the index of the heading that owns it (-1 above the first).
 
-        Built in one pass and reused for the whole frame — resolving each row
+        Built in one pass and reused for the whole frame: resolving each row
         against the heading list separately is quadratic, and this runs on every
         keystroke of a live search.
         """
@@ -905,12 +905,12 @@ def live_select(message: str, provider: Callable[[str], list], *,
         out = _header_lines()
 
         qtext = "".join(query)
-        # An empty message means the header already names the screen — the query
+        # An empty message means the header already names the screen, so the query
         # then starts at the normal margin rather than behind a stray space.
         _label = f"{C.DIM}{message}{C.RESET} " if message else ""
         # A block cursor sitting on the character, not a bar drawn between two:
         # the query stays still as the caret walks it. Empty, the block sits on
-        # the placeholder's first letter — where typing will start — with the
+        # the placeholder's first letter (where typing will start), with the
         # rest of the hint dimmed behind it.
         if qtext:
             _field = block_cursor(qtext, qpos)
@@ -934,8 +934,8 @@ def live_select(message: str, provider: Callable[[str], list], *,
         elif cursor >= viewport + vis:
             viewport = cursor - vis + 1
         # Growing the window (or deleting rows) leaves the viewport further down
-        # than it needs to be — the list stayed scrolled, showing "N above" with
-        # blank space below, until you navigated. Pull it back so the last row of
+        # than it needs to be, leaving the list scrolled with "N above" and
+        # blank space below. Pull it back so the last row of
         # the list sits on the last visible row at most.
         viewport = max(0, min(viewport, n - vis))
         out.append(f"  {C.DIM}╵ {viewport} above{C.RESET}" if viewport > 0 else "")
@@ -994,7 +994,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
             key = _read_key(fd)
 
             # Transport keys, clicks on the now-playing box, and clicks on our own
-            # hint glyphs — handled once here, before the switch below.
+            # hint glyphs, handled once here, before the switch below.
             _ch = consume_chrome(key, _hint_cells)
             if _ch is CHROME_HANDLED:
                 continue
@@ -1126,7 +1126,7 @@ def confirm(message: str, default: bool = False) -> bool:
                 key = _hk                # replay the hint's key
             if   key == 'CTRL_C':    result = False; break
             # Esc backs out of every other screen, so it must do something here
-            # too — cancelling a yes/no question means "no".
+            # too: cancelling a yes/no question means "no".
             elif key == 'ESC':       result = False; break
             elif key == 'ENTER':     result = default; break
             elif key.lower() == 'y': result = True;  break
@@ -1168,7 +1168,7 @@ def text(message: str, default: str = "") -> str | None:
         # This prompt owns the screen (it full-clears on entry), so it is laid
         # out absolutely like every other widget: message, input frame, then the
         # hint bar pinned above the miniplayer. The caret is drawn as a block on
-        # the character, like every other field — a real terminal caret is at the
+        # the character, like every other field, because a real terminal caret is at the
         # mercy of the terminal's own cursor style, and could be a thin bar or
         # invisible where the block always reads.
         # No "(^t widget)" suffix on the message: ^t is in the hint bar below,
@@ -1370,7 +1370,7 @@ def path(message: str, default: str = "") -> str | None:
         pairs = [("↵", "save"), ("tab/⇧tab", "complete"), ("esc", "back")]
         append_chrome(out, pairs, _hint_cells)
 
-        # One diffed frame — see text() above.
+        # One diffed frame; see text() above.
         frame = {i + 1: line for i, line in enumerate([""] * ui_utils.MARGIN_V + out)}
         for r in range(len(frame) + 1, _prev_rendered + ui_utils.MARGIN_V + 2):
             frame[r] = ""
@@ -1460,7 +1460,7 @@ def path(message: str, default: str = "") -> str | None:
     return result
 
 # ---------------------------------------------------------------------------
-# Timestamp cells — a split date/time field inside a list_edit table.
+# Timestamp cells: a split date/time field inside a list_edit table.
 #
 # The cell is a fixed mask.  Every slot that is still a placeholder letter shows
 # dim, so the shape of what you are filling in is always on screen and only the
@@ -1508,7 +1508,7 @@ def _ts_value(buf: list) -> str:
     """Assemble the cell's value at whatever precision has actually been filled.
 
     Leaving the time blank yields a plain date, which is a valid timestamp in its
-    own right — the field never forces a time it was not given.
+    own right: the field never forces a time it was not given.
     """
     d = _ts_digits(buf)
     if ' ' in d[0:4]:
@@ -1530,7 +1530,7 @@ def _ts_step(pos: int, delta: int) -> int:
     slots = _TS_SLOTS
     if pos in slots:
         k = slots.index(pos)
-    else:                                   # sitting on a separator — snap inward
+    else:                                   # sitting on a separator: snap inward
         k = 0 if delta > 0 else len(slots) - 1
     k = max(0, min(len(slots) - 1, k + delta))
     return slots[k]
@@ -1542,7 +1542,7 @@ def _render_timestamp_cell(buf: list, pos: int, width: int, active: bool,
 
     `base` is the styling the surrounding row is already drawn in (the selected
     row's colour + bold).  Every span closes by resetting AND re-asserting it,
-    because a bare reset would end the row's own styling too — the dim separator
+    because a bare reset would end the row's own styling too: the dim separator
     after the year would leave the rest of the stamp, and every column after it,
     unstyled.  Same rule the lyric renderer follows for markdown emphasis.
     """
@@ -1594,7 +1594,7 @@ def _layout_columns(num_cols: int, avail_w: int, col_ratios=None, col_mins=None)
     Ratios (or an even split) set the starting widths; any column below its
     minimum is then raised to it and the difference taken back from whichever
     columns have the most room to spare.  A minimum is what keeps a fixed-shape
-    cell — a full timestamp, say — readable at any terminal width while the
+    cell (a full timestamp, say) readable at any terminal width while the
     short columns beside it shrink instead.
     """
     if col_ratios and len(col_ratios) == num_cols:
@@ -1611,7 +1611,7 @@ def _layout_columns(num_cols: int, avail_w: int, col_ratios=None, col_mins=None)
     mins = [max(0, int(m or 0)) for m in mins]
 
     if sum(mins) >= avail_w:
-        # Too narrow to satisfy every minimum — share it out in their proportion
+        # Too narrow to satisfy every minimum: share it out in their proportion
         # rather than starving the last column to nothing.
         total = sum(mins) or 1
         shared = [max(1, int(avail_w * m / total)) for m in mins]
@@ -1653,7 +1653,7 @@ def _build_list_edit_lines(
     col_ratios: tuple | None = None, col_mins: tuple | None = None,
     col_types: dict | None = None,
 ) -> tuple[list[str], int, int, int]:
-    """Lay out the full list_edit screen — header, column-aligned rows (or barrel-mode cell), hints —
+    """Lay out the full list_edit screen (header, column-aligned rows or barrel-mode cell, hints)
     and report the resulting viewport/visible-row/header-row counts."""
     num_cols = len(headers)
     cols = _cols()
@@ -1686,7 +1686,7 @@ def _build_list_edit_lines(
 
         u_parts = ["─" * col_widths[i] for i in range(num_cols - 1)]
         # The last column absorbs whatever width is left over, so rule it to what
-        # it actually holds — otherwise the underline trails far past the content
+        # it actually holds; otherwise the underline trails far past the content
         # as a long bar of nothing.
         _last_content = max([len(headers[-1])] + [
             len(str((list(it) if isinstance(it, (list, tuple)) else [it])[num_cols - 1]))
@@ -1901,7 +1901,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
     fixed_rows: disables add/delete (rows can only be edited, not added or removed).
     locked_cols: set of column indices that cannot be edited.
     col_ratios: relative starting widths for the columns.
-    col_mins:   per-column minimum widths, honoured before the ratios — this is
+    col_mins:   per-column minimum widths, honoured before the ratios. This is
                 what keeps a fixed-shape cell readable when the table is narrow.
     col_types:  {column index: type} for cells that edit as something other than
                 free text. ``'timestamp'`` gives a split date/time field masked
@@ -2158,7 +2158,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                     edit_pos = nxt if nxt != edit_pos else edit_pos
                     _render()
 
-                # Anything else (letters, punctuation) is simply not accepted —
+                # Anything else (letters, punctuation) is simply not accepted:
                 # the mask supplies every separator already.
 
             elif edit_mode:
@@ -2312,7 +2312,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                         while edit_col < num_cols and edit_col in locked_cols:
                             edit_col += 1
                         if edit_col >= num_cols:
-                            edit_col = 0  # all cols locked — allow no editing
+                            edit_col = 0  # all cols locked: allow no editing
                     edit_backup = items[cursor]
 
                     if num_cols > 1:
@@ -2375,7 +2375,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                         _set_raw(fd)
                     else:
                         # Path prompt (with completion), then auto-detect the format.
-                        # Clear to a fresh screen first — path() renders inline from
+                        # Clear to a fresh screen first: path() renders inline from
                         # the cursor, so without this it draws over the list and spills.
                         _restore_term_attrs(fd, old)
                         ui_utils.clear_screen()
@@ -2556,7 +2556,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
 
             key = _read_key(fd)
             # A transport key, a click on the miniplayer, or a click on one of our
-            # own hint keys — handled the same way on every screen.
+            # own hint keys, handled the same way on every screen.
             _ch = consume_chrome(key, _hint_cells)
             if _ch is CHROME_HANDLED:
                 continue
@@ -2823,7 +2823,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
 
             key = _read_key(fd)
             # A transport key, a click on the miniplayer, or a click on one of our
-            # own hint keys — handled the same way on every screen.
+            # own hint keys, handled the same way on every screen.
             _ch = consume_chrome(key, _hint_cells)
             if _ch is CHROME_HANDLED:
                 continue
@@ -2974,7 +2974,7 @@ def fraction_edit(message: str = "Edit metadata pair:",
 
     ``varies`` names the fields ('current' / 'total') that differ across a bulk
     selection.  Those open blank, render as a dim ``──`` placeholder, and come
-    back as ``None`` if left untouched — meaning "keep each file's own value" —
+    back as ``None`` if left untouched (meaning "keep each file's own value"),
     so you can set the half the files share without flattening the half they
     don't.  Typing into such a field turns it into a real value for everything.
 
@@ -3069,7 +3069,7 @@ def fraction_edit(message: str = "Edit metadata pair:",
 
             key = _read_key(fd)
             # A transport key, a click on the miniplayer, or a click on one of our
-            # own hint keys — handled the same way on every screen.
+            # own hint keys, handled the same way on every screen.
             _ch = consume_chrome(key, _hint_cells)
             if _ch is CHROME_HANDLED:
                 continue
@@ -3235,7 +3235,7 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
 
             key = _read_key(fd)
             # A transport key, a click on the miniplayer, or a click on one of our
-            # own hint keys — handled the same way on every screen.
+            # own hint keys, handled the same way on every screen.
             _ch = consume_chrome(key, _hint_cells)
             if _ch is CHROME_HANDLED:
                 continue
@@ -3351,7 +3351,7 @@ def _eq_render_lines(bands: list, cursor: int, message: str, status: str,
     plot_w = max(10, cols - 5)              # 4 cols for the dB label + 1 gap
     avail = rows - 9
     # Three rows either side of the baseline is the comfortable minimum, but on a
-    # very short terminal — especially with the miniplayer taking rows — holding
+    # very short terminal, especially with the miniplayer taking rows, holding
     # that floor pushed the plot over its budget and into the miniplayer. Give
     # ground to 1 row per side rather than overrun: coarse, but still readable,
     # and the numbers beside it stay exact.
@@ -3464,7 +3464,7 @@ def _rva2_render_lines(gain: float, message: str, avail: int | None = None) -> l
     ]
 
     # One row per dB is the ideal, but the meter must still fit above the hint
-    # bar and the miniplayer — on a short terminal it would otherwise run off the
+    # bar and the miniplayer; on a short terminal it would otherwise run off the
     # bottom and take its own hints with it. Widen the dB-per-row step until the
     # scale fits, keeping it symmetric so 0 dB always lands on a row.
     peak = int(_RVA2_GAIN_MAX)
@@ -3520,8 +3520,8 @@ def rva2_edit(message: str = "Volume adjustment:", gain: float = 0.0) -> float |
 
     def _render():
         # Budget the meter against the rows left once this widget's own chrome
-        # (message, rule, readout, trailing blank) and the hint bar — which grows
-        # by two lines when the transport keys join it — are accounted for.
+        # (message, rule, readout, trailing blank) and the hint bar (which grows
+        # by two lines when the transport keys join it) are accounted for.
         _pairs = [("↑↓", "adjust"), ("⇞⇟", "±3 dB"), ("0", "zero"),
                   ("↵", "save"), ("esc", "back"), ("q", "quit app")]
         _avail = _hint_pin_target() - 4 - len(chrome_hint_lines(_pairs))
@@ -3549,7 +3549,7 @@ def rva2_edit(message: str = "Volume adjustment:", gain: float = 0.0) -> float |
 
             key = _read_key(fd)
             # A transport key, a click on the miniplayer, or a click on one of our
-            # own hint keys — handled the same way on every screen.
+            # own hint keys, handled the same way on every screen.
             _ch = consume_chrome(key, _hint_cells)
             if _ch is CHROME_HANDLED:
                 continue
@@ -3647,7 +3647,7 @@ def number_edit(message: str = "Edit number:", *, value: int = 0,
 
             key = _read_key(fd)
             # A transport key, a click on the miniplayer, or a click on one of our
-            # own hint keys — handled the same way on every screen.
+            # own hint keys, handled the same way on every screen.
             _ch = consume_chrome(key, _hint_cells)
             if _ch is CHROME_HANDLED:
                 continue
@@ -3720,7 +3720,7 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
         filled = f"{C.ACCENT}{'★' * stars}{C.RESET}"
         empty = f"{C.DIM}{'☆' * (5 - stars)}{C.RESET}"
         rlabel = "unrated" if stars == 0 else f"{stars}/5"
-        # Plays and Rater take typing but drew nothing to type against — the
+        # Plays and Rater take typing but drew nothing to type against: the
         # block shows which field has the keyboard and where the next character
         # lands. Both append at the end, so the block rides there.
         cshown = "".join(cbuf) if cbuf else str(count)
@@ -3768,7 +3768,7 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
 
             key = _read_key(fd)
             # A transport key, a click on the miniplayer, or a click on one of our
-            # own hint keys — handled the same way on every screen.
+            # own hint keys, handled the same way on every screen.
             _ch = consume_chrome(key, _hint_cells)
             if _ch is CHROME_HANDLED:
                 continue
@@ -3862,7 +3862,7 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
             if note:
                 status += f"   {C.DIM}· {note}{C.RESET}"
         else:
-            status = f"{C.DIM}no bands — [a] add one{C.RESET}"
+            status = f"{C.DIM}no bands, [a] add one{C.RESET}"
         # Size the plot to the rows left above the pinned hint bar and the
         # miniplayer, not to the whole terminal, so it never draws over them.
         _pairs = [("↑↓", "gain"), ("←→", "band"), ("⇞⇟", "±3"), ("a", "add"),
@@ -3892,7 +3892,7 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
 
             key = _read_key(fd)
             # A transport key, a click on the miniplayer, or a click on one of our
-            # own hint keys — handled the same way on every screen.
+            # own hint keys, handled the same way on every screen.
             _ch = consume_chrome(key, _hint_cells)
             if _ch is CHROME_HANDLED:
                 continue
