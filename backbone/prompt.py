@@ -19,26 +19,23 @@ import os
 import datetime
 import calendar as cal
 import tempfile
-import time
 import subprocess
 from typing import Any, Callable, Literal, overload
 
+from .prompt_core import Choice, Column, separator  # noqa: F401 - what select() callers pass in
 from .prompt_core import (
     _IS_WINDOWS, _COLUMNS_MAX_WIDTH, _EDGE_MARGIN,
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress,
-    _col, _hint, _render_status_bar,
-    Choice, Column,
-    _cell_text, _style_cell, _render_cell_segments, _table_widths, _render_table_row,
-    separator, _split_columns, _clip_ansi, _render_select_columns, _style_checkbox_label, _norm,
+    _hint, _render_status_bar,
+    _table_widths, _render_table_row, _clip_ansi, _norm,
     block_cursor, block_cursor_width,
-    _read_key, _read_key_raw,
-    _visible_rows, _cols, _rows, _hint_lines, _wrap_bordered_input_lines,
+    _read_key,
+    _visible_rows, _cols, _wrap_bordered_input_lines,
     _Widget,
     add_hint_click_cells, footer_click_action, _hint_pin_target, screen_paint, screen_invalidate, screen_takeover_next,
 )
 from . import ui as ui_utils
 from . import datetime_parse as dtp
-from . import nav as _state
 from .nav import QuitToTerminal
 C = ui_utils.Colors
 
@@ -1285,7 +1282,7 @@ def path(message: str, default: str = "") -> str | None:
             return []
 
     def _render():
-        nonlocal _last_rendered_lines, _tab_matches
+        nonlocal _last_rendered_lines
         cols    = _cols()
         content = "".join(buf)
         prefix  = "  │ "
@@ -1676,7 +1673,6 @@ def _build_list_edit_lines(
 
     avail_w = max(10, inner - 4 - (2 * (num_cols - 1)))
     col_widths = _layout_columns(num_cols, avail_w, col_ratios, col_mins)
-    col_w = col_widths[0] if num_cols > 1 else avail_w
     last_w = col_widths[-1]
 
     if num_cols > 1:
@@ -2267,7 +2263,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                     _render()
                 elif key.startswith('MOUSE_CLICK:'):
                     _parts = key.split(':')
-                    _btn, _mrow, _mcol = int(_parts[1]), int(_parts[2]), int(_parts[3])
+                    _btn, _mrow = int(_parts[1]), int(_parts[2])
                     if _btn == 0 and items:
                         # render() prepends MARGIN_V blank rows before lines[0]
                         _line_idx   = _mrow - 1 - ui_utils.MARGIN_V
@@ -2362,7 +2358,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                     if key == 'i':
                         if num_cols > 1:
                             template = (
-                                f"# One entry per line: "
+                                "# One entry per line: "
                                 + " : ".join(h.lower() for h in headers)
                                 + "\n# Example:\n"
                                 + " : ".join(h.lower() for h in headers)
@@ -2486,8 +2482,6 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
     _hint_cells: dict = {}   # clickable hint keys, filled by append_chrome
 
     def _render():
-        cols = ui_utils.get_terminal_width()
-        c = cols - 4
         lines = []
 
         # Header
@@ -2729,7 +2723,6 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
     _hint_cells: dict = {}   # clickable hint keys, filled by append_chrome
 
     def _render():
-        cols = ui_utils.get_terminal_width()
         lines = []
 
         lines.append(f"  {C.DIM}{message}{C.RESET}")
@@ -3017,8 +3010,6 @@ def fraction_edit(message: str = "Edit metadata pair:",
     _hint_cells: dict = {}   # clickable hint keys, filled by append_chrome
 
     def _render():
-        cols = ui_utils.get_terminal_width()
-        c = cols - 4
         lines = []
 
         lines.append(f"  {C.DIM}{message}{C.RESET}")
@@ -3150,12 +3141,6 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
     }
 
     field_order = ['hours', 'minutes', 'seconds', 'millis']
-    field_labels = {
-        'hours': 'HH',
-        'minutes': 'MM',
-        'seconds': 'SS',
-        'millis': 'ms',
-    }
     field_maxlen = {
         'hours': 2,
         'minutes': 2,
@@ -3182,8 +3167,6 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
             return False
 
     def _render():
-        cols = ui_utils.get_terminal_width()
-        c = cols - 4
         lines = []
 
         lines.append(f"  {C.DIM}{message}{C.RESET}")
@@ -3191,7 +3174,6 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
 
         row = "  "
         for i, field in enumerate(field_order):
-            label = field_labels[field]
             value = "".join(fields[field])
             pos = positions[field]
 
@@ -3716,7 +3698,6 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
         return int("".join(cbuf)) if cbuf else count
 
     def _render():
-        nonlocal count
         filled = f"{C.ACCENT}{'★' * stars}{C.RESET}"
         empty = f"{C.DIM}{'☆' * (5 - stars)}{C.RESET}"
         rlabel = "unrated" if stars == 0 else f"{stars}/5"

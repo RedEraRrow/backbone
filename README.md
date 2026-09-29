@@ -31,7 +31,10 @@ immediately, no reinstall.
 the `SPIN` / `PARTS` / `SPARK` glyph sets. Also the ANSI-aware text
 measuring (`visual_len`, `truncate_text`, `clip_ansi`, `strip_ansi`) that
 makes any of that survive colour codes and wide characters, and small
-formatters: `plural`, `human_gb`, `dir_size_kb`.
+formatters: `plural`, `human_gb`, `dir_size_kb`. The accent colour is chosen
+with `set_accent` (an `ACCENT_PRESETS` key or `#RRGGBB`); a tool calls it once
+at startup from its own settings, and `accent_code` / `accent_label` let a
+settings screen check and name a value.
 
 `from backbone import ...` exposes only a subset of `ui` (`Colors`, the
 margins and glyph sets, `spinner`, `content_width`, `rule`, `bar`,
