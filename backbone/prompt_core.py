@@ -1,19 +1,4 @@
-"""prompt_core.py - the terminal machinery under every prompt widget.
-
-- The screen painter: one model of what each screen row shows
-  (`screen_paint`, `screen_row_paint`), so a repaint writes only the rows
-  that changed, in one flush. `_Widget` paints a widget's frame through it.
-- Key reading: raw mode, and `_read_key` turning escape sequences, mouse
-  clicks and focus events into key names ('UP', 'PGDN', 'MOUSE_CLICK:...').
-- `Choice` and `Column`, the list and table types behind select(), and the
-  table layout that fits columns to the terminal width.
-- The footer hint bar (`hint`) and the mapping from a click on one of its
-  keys back to that key (`add_hint_click_cells`, `footer_click_action`).
-- The footer box and status bar repaints on idle ticks.
-- `run_dashboard`, the loop for a live, tick-driven view.
-
-`python3 -m backbone.prompt_core` runs the self-check.
-"""
+"""Terminal primitives shared across prompt widgets."""
 from __future__ import annotations
 import re
 import sys
@@ -22,9 +7,10 @@ import math
 import textwrap
 import time
 import select as _sel
-from typing import Any, Callable, Literal, overload
+from typing import Any
 
-from . import ui as ui_utils
+from backbone import ui as ui_utils
+from backbone.log import log, enabled as _logging, quietly
 C = ui_utils.Colors
 
 _IS_WINDOWS = os.name == "nt"
@@ -69,7 +55,7 @@ _footer_last_draw = [0.0]
 _status_prev_active = [False]            # was a background task shown last idle tick?
 
 # Self-pipe so background threads can wake the menu poll to repaint the box the
-# instant its content changes (see ui_utils.pulse_footer()). The
+# instant playback state changes; see ui_utils.pulse_footer(). The
 # poll's select() watches the read end alongside stdin; a pulse makes it return
 # immediately and repaint, rather than waiting on the next keystroke or timeout.
 try:
@@ -99,17 +85,56 @@ if _wake_r >= 0:
 # One entry per screen row holding what is currently displayed there, shared by
 # every writer (widget frames, the now-playing box, the status bar). A repaint
 # writes only the rows whose content actually changed and never erases a row
-# before rewriting it. Erasing to the end of the screen and redrawing everything
-# each frame is what made the whole screen flicker and the miniplayer blink out and
-# back on every keystroke. Rows are also written *absolutely*, with no newlines,
+# before rewriting it: erasing to the end of the screen and redrawing everything
+# makes the screen flicker and the now-playing box blink on every keystroke. Rows are also written *absolutely*, with no newlines,
 # so a line-buffered stdout cannot flush a half-drawn frame.
 _screen: dict[int, str] = {}
+# The terminal size the model was painted at. A resize reflows what is on
+# screen, so the model no longer describes it: the next paint wipes the screen
+# and repaints every row, whether or not the screen's own code thought to clear.
+_screen_size: list = [None]
 
 
 def screen_invalidate() -> None:
     """Forget what is on screen: after a full clear, a resize, or a write by
-    something that doesn't go through here (the player view)."""
+    something that doesn't go through here (the player view). A clear at a new
+    size (a screen answering a resize) counts as the resize wipe too."""
+    size = ui_utils.get_terminal_size()
+    if _screen_size[0] is not None and size != _screen_size[0]:
+        _note_resize(_screen_size[0], size)
+        _screen_size[0] = size
     _screen.clear()
+
+
+def _note_resize(was: tuple, size: tuple) -> None:
+    """Log a resize: how long after the terminal reported it we're repainting,
+    and which rows of the old frame were wider than the new window, the ones
+    the terminal rewrapped before we could redraw."""
+    if not _logging():
+        return
+    wide = sorted(r for r, key in _screen.items() if _row_width(key.split("\x00", 1)[0]) > size[0])
+    log.debug("resize %sx%s -> %sx%s, repaint %.0f ms after the signal; %d old rows "
+              "wider than the new width (rewrapped by the terminal): %s",
+              was[0], was[1], size[0], size[1], ui_utils.ms_since_resize_signal(),
+              len(wide), wide[:20])
+
+
+def _resize_wipe() -> str:
+    """"" normally; after a terminal resize, a full clear (and a forgotten
+    model), so the frame being painted repaints everything."""
+    size = ui_utils.get_terminal_size()
+    if size == _screen_size[0]:
+        return ""
+    was, _screen_size[0] = _screen_size[0], size
+    if was is not None:
+        _note_resize(was, size)
+    _screen.clear()
+    return "\033[H\033[2J" if was is not None else ""
+
+
+def _row_width(text: str) -> int:
+    """Visible width of a painted row, ignoring colour codes."""
+    return ui_utils.visual_len(ui_utils.strip_ansi(text))
 
 
 def _register_screen_hooks() -> None:
@@ -123,11 +148,11 @@ _takeover_pending = [False]
 def screen_takeover_next() -> None:
     """Take the screen over on the next frame *without* clearing it first.
 
-    Called on entering a widget instead of clearing: the next paint overwrites
-    the rows it needs and blanks whatever the previous screen left behind, in
-    the same flush, so there is no blank flash between screens. A clear is
-    only needed when the terminal reflowed (resize) or something painted
-    outside this model.
+    Called where a widget would otherwise clear on entry: the next paint
+    overwrites the rows it needs and blanks whatever the previous screen left
+    behind, in the same flush, so there is no blank flash between screens. A
+    clear is only needed when the terminal reflowed (resize) or something
+    painted outside this model.
     """
     _takeover_pending[0] = True
 
@@ -164,11 +189,15 @@ def screen_row_paint(row: int, text: str, extra: str = "") -> str:
     whose overlay went away is erased rather than keeping stale glyphs. A blank
     row is content too: "" differs from anything previously drawn there.
     """
+    wipe = _resize_wipe()
     key = f"{text}\x00{extra}"
     if _screen.get(row) == key:
         return ""
     _screen[row] = key
-    return f"\033[{row};1H\033[2K{text}{extra}"
+    if _logging() and _row_width(text) > (_screen_size[0] or (0, 0))[0]:
+        log.warning("row %d painted %d wide in a %d-column window: %r", row,
+                    _row_width(text), _screen_size[0][0], ui_utils.strip_ansi(text)[:80])
+    return f"{wipe}\033[{row};1H\033[2K{text}{extra}"
 
 
 def screen_row_segment(row: int, text: str) -> str:
@@ -287,24 +316,20 @@ def _render_footer_bar() -> None:
 def _wait_for_keypress(timeout: float = 0.05) -> bool:
     """Block up to `timeout` seconds for a keypress; return whether one arrived.
 
-    Also refreshes the footer box at ~4 Hz so background-audio status
+    Also refreshes the now-playing box at ~4 Hz so background-audio status
     stays live on every widget/menu without each one needing its own tick."""
     now = time.time()
     if now - _footer_last_draw[0] >= 0.12:
         _footer_last_draw[0] = now
-        try:
+        with quietly():
             _render_footer_bar()
-        except Exception:
-            pass
         # Keep the background-activity notice live: while a task is running the
         # status bar is re-stamped each tick so it stays up for the whole job and
         # its cyan ● pulses; one extra redraw after the last task clears the bar.
         active = ui_utils.has_background_tasks()
         if active or _status_prev_active[0]:
-            try:
+            with quietly():
                 _render_status_bar()
-            except Exception:
-                pass
         _status_prev_active[0] = active
     if _IS_WINDOWS:
         end = time.time() + timeout
@@ -321,22 +346,10 @@ def _wait_for_keypress(timeout: float = 0.05) -> bool:
         except OSError:
             pass
         _footer_last_draw[0] = time.time()    # this pulse counts as the tick
-        try:
+        with quietly():
             _render_footer_bar()     # repaint immediately on a state change
-        except Exception:
-            pass
     return sys.stdin in ready             # a wake alone is not a keypress
 
-
-def _clrline():
-    """Clear the current line and return the cursor to column 1."""
-    return "\033[2K\r"
-def _goto(row, col=1):
-    """Move the cursor to `row`, `col` (1-based)."""
-    return f"\033[{row};{col}H"
-def _col(n):
-    """Move the cursor to column `n` on the current row."""
-    return f"\033[{n}G"
 
 
 def _cols() -> int:
@@ -345,12 +358,125 @@ def _cols() -> int:
 
 
 
-def hint(*pairs, extra="") -> str:
-    """The footer hint bar for `pairs` of (key, label), laid out to fit the
-    terminal width. Tries, in order: one centred line, an upside-down
-    pyramid, a grid, an aligned vertical stack, a split vertical stack.
+# --- Hint bar visibility ------------------------------------------------------
+# One switch for every screen's hint bar, off until turned on (`i`, or a click on
+# the corner toggle each screen shows on its top line), remembered between runs.
+# Kept in its own small file rather than config.json: screens hold a loaded
+# config and save it back later, which would quietly undo a toggle made meanwhile.
+HINTS_CLICK = '\x00hints'     # the key a click on the corner toggle replays
+_hints_on: list = [None]      # None until first read
+
+
+def _hints_file():
+    from backbone import app
+    return app.config_dir / "hints_on"
+
+
+def hints_visible() -> bool:
+    """Whether hint bars are shown."""
+    if _hints_on[0] is None:
+        try:
+            _hints_on[0] = _hints_file().exists()
+        except Exception:
+            _hints_on[0] = False
+    return _hints_on[0]
+
+
+def toggle_hints() -> None:
+    """Show or hide every hint bar, and remember it."""
+    _hints_on[0] = not hints_visible()
+    try:
+        f = _hints_file()
+        if _hints_on[0]:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.touch()
+        else:
+            f.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def help_corner_text() -> tuple[str, int]:
+    """The header toggle, styled, and its width: `[i] help` / `[i] hide help`."""
+    label = "hide help" if hints_visible() else "help"
+    return (f"{C.RESET}{C.DIM}[{C.RESET}{C.BOLD}i{C.RESET}{C.DIM}] {label}{C.RESET}",
+            4 + len(label))
+
+
+def add_help_corner(line: str, row: int, cells: dict, i_key: bool = False) -> str:
+    """`line` (a screen's top line, drawn on screen row `row`) with the toggle
+    right-aligned on it, clipping the line if the two would meet. Only the `i`
+    is clickable (a click replays HINTS_CLICK). `i_key`: pressing `i` toggles
+    here too; elsewhere `i` is typed or bound, and the click is the way."""
+    text, width = help_corner_text()
+    col = max(1, ui_utils.get_terminal_width() - ui_utils.MARGIN_H - width + 1)
+    room = col - 2                                   # keep one blank column before it
+    body = line if ui_utils.visual_len(ui_utils.strip_ansi(line)) <= room else _clip_ansi(line, room)
+    pad = max(1, col - 1 - ui_utils.visual_len(ui_utils.strip_ansi(body)))
+    cells[(row, col + 1)] = HINTS_CLICK              # the `i` of "[i]"
+    if i_key:
+        cells['__i_key__'] = True                    # consume_chrome: `i` toggles here
+    return f"{body}{C.RESET}{' ' * pad}{text}"
+
+
+def rounded_header(title: str, detail: str = "", right: str = "",
+                   subtitle: str | None = None) -> list[str]:
+    """The app's boxed header for a file (or a set of them): bold `title`, dim
+    `detail` after it (" · artist"), dim facts `right`-aligned, and the hints
+    toggle inline at the far right of the same row, then an optional dim
+    `subtitle` row and a blank row. When space runs out the detail is trimmed
+    first, then the facts dropped, then the title trimmed; the toggle stays."""
+    vl = ui_utils.visual_len
+    mh = ui_utils.MARGIN_H
+    inner = max(12, ui_utils.get_terminal_width() - 2 * mh - 4)
+    toggle, tw = help_corner_text()
+
+    def _fit(text: str, n: int) -> str:
+        return text if vl(text) <= n else (text[:max(0, n - 1)] + "…" if n > 1 else "")
+
+    tail = tw + (vl(right) + 2 if right else 0)
+    if right and vl(title) + tail + 1 > inner:
+        right, tail = "", tw                         # no room for the facts
+    avail = max(1, inner - tail - 1)
+    title = _fit(title, avail)
+    detail = _fit(detail, avail - vl(title)) if avail - vl(title) > 5 else ""
+    left = f"{C.BOLD}{title}{C.RESET}{C.DIM}{detail}{C.RESET}"
+    gap = max(1, inner - vl(title) - vl(detail) - tail)
+    facts = f"{C.DIM}{right}{C.RESET}  " if right else ""
+    edge = f"{' ' * mh}{C.DIM}"
+    lines = [f"{edge}╭{'─' * (inner + 2)}╮{C.RESET}",
+             f"{edge}│{C.RESET} {left}{' ' * gap}{facts}{toggle} {C.DIM}│{C.RESET}"]
+    if subtitle:
+        sub = _fit(subtitle, inner)
+        lines.append(f"{edge}│{C.RESET} {C.DIM}{sub}{' ' * (inner - vl(sub))}{C.RESET} {C.DIM}│{C.RESET}")
+    lines += [f"{edge}╰{'─' * (inner + 2)}╯{C.RESET}", ""]
+    return lines
+
+
+def place_help_toggle(out: list, first_row: int, cells: dict, i_key: bool = False) -> None:
+    """Make the hints toggle on a screen clickable: a header that already
+    carries it (rounded_header) gets its `i` registered where it is; otherwise
+    it is added to the top line, `out[0]`. `out[k]` is drawn on row first_row + k."""
+    for k, line in enumerate(out[:4]):
+        plain = ui_utils.strip_ansi(line)
+        at = plain.find("[i] ")
+        if at >= 0 and plain[at + 4:].startswith(("help", "hide help")):
+            cells[(first_row + k, ui_utils.visual_len(plain[:at]) + 2)] = HINTS_CLICK
+            if i_key:
+                cells['__i_key__'] = True
+            return
+    if out:
+        out[0] = add_help_corner(out[0], first_row, cells, i_key)
+
+
+def _hint(*pairs, extra="", always: bool = False) -> str:
     """
-    if not pairs and not extra:
+    Lays out the hint bar, falling back through: one line → pyramid → grid →
+    aligned stack → split stack.
+    Every hint bar comes through here, so hiding them (hints_visible) is one
+    check; `always` draws regardless (the player's own `[i] help` stays in its bar).
+    """
+    if (not pairs and not extra) or not (always or hints_visible()):
         return ""
 
     cols = _cols()
@@ -465,7 +591,7 @@ def hint(*pairs, extra="") -> str:
             stack_lines.append(f"{' ' * global_pad}{left_side} {right_side}")
         return "\n".join(stack_lines)
 
-    # LAYOUT 5: Split Vertical Stack (Ultimate Narrow Fallback)
+    # LAYOUT 5: Split Vertical Stack (narrowest fallback)
     # Key on row 1, value on row 2, dot separator between pairs.
     split_lines = []
     for i, (k, v, _) in enumerate(parsed_items):
@@ -477,16 +603,12 @@ def hint(*pairs, extra="") -> str:
         v_pad = max(0, cols - len(v)) // 2
         split_lines.append(f"{' ' * v_pad}{C.DIM}{v}{C.RESET}")
 
-        # Add centred separator dot between discrete blocks
+        # Add centered separator dot between discrete blocks
         if i < total_items - 1:
             dot_pad = max(0, cols - 1) // 2
             split_lines.append(f"{' ' * dot_pad}{C.DIM}⋅{C.RESET}")
 
     return "\n".join(split_lines)
-
-
-_hint = hint   # the name prompt.py and older callers use
-
 
 # --- Clickable hints & now-playing box hit-testing -------------------------
 # Hint keys render as ``[key] label`` with only ``key`` bold/bright; a click is
@@ -496,12 +618,11 @@ _hint = hint   # the name prompt.py and older callers use
 # maps to the SAME synthesised key the keyboard produces, so the widgets need no
 # extra per-key logic: a click just replays that key through their normal switch.
 
-_HINT_ARROWS = {'↑': 'UP', '↓': 'DOWN', '←': 'LEFT', '→': 'RIGHT'}
+_HINT_ARROWS = {'↑': 'UP', '↓': 'DOWN', '←': 'LEFT', '→': 'RIGHT', '⇞': 'PGUP', '⇟': 'PGDN'}
 _HINT_WORDS = {
     'space': 'SPACE', 'spc': 'SPACE', 'esc': 'ESC', 'tab': 'TAB', '↵': 'ENTER',
     'pgup': 'PGUP', 'pgdn': 'PGDN', '⇧tab': 'BACKTAB', 'home': 'HOME', 'end': 'END',
 }
-
 
 
 def _hint_key_tokens(key: str) -> list[tuple[int, int, str]]:
@@ -535,7 +656,7 @@ def _hint_key_tokens(key: str) -> list[tuple[int, int, str]]:
 def add_hint_click_cells_auto(cells: dict, line: str, base_row: int,
                               left_inset: int = 0) -> None:
     """Like add_hint_click_cells but auto-detects ``[key]`` groups in the plain
-    text (no pairs needed). Use only on lines known to be a hint bar, as arbitrary
+    text (no pairs needed). Use only on lines known to be a hint bar; arbitrary
     bracketed text (e.g. a lyric ``[Chorus]``) would be picked up as a key."""
     plain = ui_utils.display_text(line)
     for m in re.finditer(r'\[([^\[\]]+)\]', plain):
@@ -566,7 +687,7 @@ def add_hint_click_cells(cells: dict, line: str, base_row: int, pairs,
 
 def _hint_pin_target() -> int:
     """The flowed-line count after which a widget's hint bar sits pinned at the
-    bottom, directly above the miniplayer + status bar, so its keys keep the
+    bottom, directly above the now-playing box and status bar, so its keys keep the
     same screen position across redraws (repeated clicks don't chase the bar)."""
     rows = ui_utils.get_terminal_height()
     return rows - 1 - ui_utils.MARGIN_V - max(ui_utils.footer_height(), ui_utils.MARGIN_V)
@@ -632,8 +753,8 @@ class Choice:
         self.cursor_title = cursor_title  # alternate label shown when cursor is on this row
 
 
-# The single inter-column gap for every list, so columns line up the same in
-# every one. Narrow terminals are handled by column `priority` (columns drop)
+# The single inter-column gap for every list in the app, so columns line up the
+# same way in every list. Narrow terminals are handled by column `priority` (columns drop)
 # and by the dynamically computed pin gap, not by varying this.
 COL_GAP = 3
 
@@ -696,7 +817,7 @@ def _style_cell(text: str, style: str, is_current: bool) -> str:
     if style == 'primary':
         return f"{C.BOLD}{text}{C.RESET}" if is_current else text
     if style == 'cursor':
-        # The block cursor as a cell segment. See block_cursor(), which does the
+        # The block cursor as a cell segment; see block_cursor(), which does the
         # same thing where a whole line rather than a table cell is being drawn.
         return f"{C.INVERT}{C.BOLD}{text}{C.RESET}"
     return text  # 'normal'
@@ -869,7 +990,7 @@ def _table_widths(rows_cells: list, columns: list, eff: int,
         # Over budget: shave the widest kept column repeatedly until it fits,
         # never below its floor (min_width, a readable minimum, or its own
         # content if that is already smaller). The readable minimum eases toward
-        # the fair per-column share when a many-column row is really cramped,
+        # the fair per-column share when a many-column row is genuinely cramped,
         # so the layout still fits. n and the deficit are both small.
         floor_cap = min(_MIN_COL_FLOOR, max(1, budget // len(kept)))
         floors = {i: min(widths[i], max(columns[i].min_width, floor_cap)) for i in kept}
@@ -880,7 +1001,7 @@ def _table_widths(rows_cells: list, columns: list, eff: int,
                 if widths[i] > floors[i] and (widest < 0 or widths[i] > widths[widest]):
                     widest = i
             if widest < 0:
-                break                    # everything at its floor; the clip guard handles the rest
+                break                    # everything at its floor; clip guard handles the rest
             widths[widest] -= 1
             deficit -= 1
     return widths
@@ -945,6 +1066,32 @@ def _render_table_row(cells: list, columns: list, is_current: bool,
     return left
 
 
+def edit_line(buf: list, pos: int, key: str) -> int | None:
+    """Apply one line-editing key to `buf` (a list of characters) in place
+    (typing, space, backspace, delete, ←/→, Home/End) and return the caret's new
+    position, or None when `key` isn't one of them. The one editor every text
+    field uses, so a key works the same in each."""
+    if key == 'BACKSPACE':
+        if pos > 0:
+            del buf[pos - 1]; pos -= 1
+    elif key == 'DELETE':
+        if pos < len(buf):
+            del buf[pos]
+    elif key == 'LEFT':
+        pos = max(0, pos - 1)
+    elif key == 'RIGHT':
+        pos = min(len(buf), pos + 1)
+    elif key == 'HOME':
+        pos = 0
+    elif key == 'END':
+        pos = len(buf)
+    elif key == 'SPACE' or (len(key) == 1 and key.isprintable()):
+        buf.insert(pos, ' ' if key == 'SPACE' else key); pos += 1
+    else:
+        return None
+    return pos
+
+
 def block_cursor(text: str, pos: int, base: str = '') -> str:
     """`text` with a white block cursor sitting *on* the character at `pos`.
 
@@ -973,42 +1120,6 @@ def separator(title: str = "") -> Choice:
     return Choice(title, value=None, disabled=True)
 
 
-def _split_columns(title: str, parse_fraction: bool = False) -> tuple[str, str, str, str]:
-    """Split a plain title into (label, type, value, fraction) columns, matching
-    the checkbox grammar:  LABEL [type] | value   n/total.
-    Type is only taken from an explicit [bracket], or a trailing word when a
-    `|` value divider is present, so plain titles keep their whole label.
-
-    parse_fraction is off by default: a trailing N/M (e.g. a track/disc/movement
-    value like 3/12) must stay in the value column, not be mistaken for a count."""
-    title = ui_utils.strip_ansi(title)
-    frac = ""
-    value = ""
-    if parse_fraction:
-        m = re.search(r"(\d+/\d+)\s*$", title)
-        if m:
-            frac = m.group(1)
-            title = title[:m.start()].rstrip()
-
-    had_pipe = bool(re.search(r"\s*\|\s*", title))
-    if had_pipe:
-        left, right = re.split(r"\s*\|\s*", title, maxsplit=1)
-        value = right.strip()
-        title = left.rstrip()
-
-    type_tag = ""
-    mb = re.search(r"\[([^\]]+)\]\s*$", title)
-    if mb:
-        type_tag = mb.group(1).strip()
-        title = title[:mb.start()].rstrip()
-    elif had_pipe:
-        mw = re.search(r"([A-Za-z\s\d]+)\s*$", title)
-        if mw:
-            type_tag = mw.group(1).strip()
-            title = title[:mw.start()].rstrip()
-
-    return title.rstrip(), type_tag, value, frac
-
 
 def _clip_ansi(s: str, width: int) -> str:
     """Truncate a string to `width` visible columns, preserving ANSI escape
@@ -1016,68 +1127,9 @@ def _clip_ansi(s: str, width: int) -> str:
     return ui_utils.clip_ansi(s, width)
 
 
-def _render_select_columns(parsed: tuple[str, str, str, str], is_current: bool,
-                           label_w: int, type_w: int, cols: int) -> str:
-    """Render one select() row in column layout: pointer + LABEL (friendly name
-    greyed) + type (greyed) + single divider + value. Every column is truncated
-    to its budget so the row always fits `cols` (no wrapping). Mirrors bulk."""
-    label, type_tag, value, frac = parsed
-
-    head, tail = (lambda m: (m.group(1), m.group(2)) if m else (label, ""))(
-        re.match(r'^(\S+)\s+(\(.*\))$', label))
-
-    # Fit "TAG (friendly name)" into label_w, keeping the closing bracket.
-    if len(label) > label_w:
-        if tail and len(head) + 4 <= label_w:
-            inner = tail[1:-1]
-            budget = label_w - len(head) - 4          # " (" + "…" + ")"
-            tail = f"({inner[:max(0, budget)].rstrip()}…)"
-        else:
-            head = head[:max(1, label_w - 1)] + "…"
-            tail = ""
-    vis_label = f"{head} {tail}" if tail else head
-
-    head_s = f"{C.PRIMARY}{C.BOLD}{head}{C.RESET}" if is_current else head
-    label_s = f"{head_s} {C.DIM}{tail}{C.RESET}" if tail else head_s
-    label_pad = " " * max(0, label_w - len(vis_label))
-
-    if len(type_tag) > type_w:
-        type_tag = type_tag[:max(1, type_w - 1)] + "…"
-    type_s = f"{C.DIM}{type_tag}{C.RESET}" if type_tag else ""
-    type_pad = " " * max(0, type_w - len(type_tag)) if type_w else ""
-
-    pointer = f"{C.ACCENT}›{C.RESET}" if is_current else " "
-    avail = max(4, cols - (label_w + type_w + 10) - (len(frac) + 2 if frac else 0))
-    if value and len(value) > avail:
-        value = value[:max(1, avail - 1)] + "…"
-    if value:
-        sep = f"{C.DIM}|{C.RESET} "
-        value_s = f"{C.PRIMARY}{C.BOLD}{value}{C.RESET}" if is_current else value
-    else:
-        sep = ""
-        value_s = ""
-
-    row = f"  {pointer} {label_s}{label_pad}  {type_s}{type_pad}  {sep}{value_s}"
-    if frac:
-        row += f"  {C.DIM}{frac}{C.RESET}"
-    return row
-
-
-def _style_checkbox_label(label_text: str, is_current: bool, is_dimmed: bool) -> str:
-    """Style a checkbox label, greying a trailing parenthetical (e.g. a friendly
-    name) so it stays subordinate to the leading token: `TAG (friendly name)`.
-    Visible length is unchanged, so column alignment is preserved."""
-    m = re.match(r'^(\S+)\s+(\(.*\))$', label_text)
-    head, tail = (m.group(1), m.group(2)) if m else (label_text, "")
-
-    if is_dimmed:
-        return f"{C.DIM}{label_text}{C.RESET}"
-    head_str = f"{C.PRIMARY}{C.BOLD}{head}{C.RESET}" if is_current else head
-    return f"{head_str} {C.DIM}{tail}{C.RESET}" if tail else head_str
-
 
 def _norm(choices: list) -> list:
-    """Normalise a mixed list of Choice/str/dict/choice-like objects into Choice instances."""
+    """Normalize a mixed list of Choice/str/dict/choice-like objects into Choice instances."""
     out = []
     for c in choices:
         if isinstance(c, Choice):
@@ -1101,10 +1153,12 @@ def _norm(choices: list) -> list:
 
 
 def _read_key(fd: int) -> str:
-    """Read one key, transparently discarding focus in/out events."""
+    """Read one key, discarding focus-out events. Focus-in is passed on: the
+    terminal may not have painted us while unfocused, so every widget repaints
+    on it (consume_chrome answers it with a full redraw)."""
     while True:
         key = _read_key_raw(fd)
-        if key not in ('FOCUS_IN', 'FOCUS_OUT'):
+        if key != 'FOCUS_OUT':
             return key
 
 
@@ -1147,9 +1201,9 @@ def _read_key_raw(fd: int) -> str:
         try:
             # A lone Esc is just this byte; an arrow/function key sends more in
             # the same burst. Raw mode's read blocks while nothing is pending, so
-            # peek first. Otherwise Esc looks dead until the *next* keypress
+            # peek first, or Esc looks dead until the *next* keypress
             # arrives to unblock the read, and that keypress is then swallowed
-            # as part of the sequence.
+            # as part of the sequence, so Esc would only work on a second press.
             if not _byte_ready(fd, _ESC_SEQ_TIMEOUT):
                 return 'ESC'
             ch2 = os.read(fd, 1)
@@ -1188,7 +1242,8 @@ def _read_key_raw(fd: int) -> str:
                         buf += c
                     return 'ESC'
                 if seq.isdigit():
-                    # ESC [ <number> ~ : page/home/end/delete/insert.
+                    # ESC [ <number> ~ : page/home/end/delete/insert. Read the
+                    # whole number, or PgUp and PgDn would come through as 'ESC'.
                     num, term = seq, ''
                     while len(num) < 4 and _byte_ready(fd, _ESC_SEQ_TIMEOUT):
                         c = os.read(fd, 1).decode('utf-8', errors='replace')
@@ -1248,10 +1303,10 @@ def _visible_rows() -> int:
     """Total lines a list widget may emit: the full terminal height minus the
     status bar (1) and the top+bottom vertical margins. Callers subtract their
     OWN chrome (header, message, indicators, hints); do not double-count it
-    here, or lists show a premature "N more" (they did, by ~5-7 rows)."""
+    here, or lists show a premature "N more"."""
     _, rows = ui_utils.get_terminal_size()
-    # Reserve the status-bar row, plus the footer box's rows whenever one is
-    # shown, so lists never collide with it.
+    # Reserve the status-bar row, plus the now-playing box's rows whenever
+    # background audio is active, so lists never collide with it.
     reserve = 1 + ui_utils.footer_height()
     return max(4, rows - reserve - 2 * ui_utils.MARGIN_V)
 
@@ -1280,15 +1335,13 @@ def _wrap_bordered_input_lines(text: str, content_width: int) -> list[str]:
 
 class _Widget:
     """
-    Renders a list of lines from row 1 of the screen, through the painter.
-
-    Its first frame takes the screen over without clearing it. After a resize
-    (anchor_reset) it clears the whole screen and redraws from scratch, the
-    only reliable way to prevent ghost lines once the terminal has reflowed.
+    Paints a widget's lines from row 1 through the shared screen model. The
+    first frame takes the screen over without a clear; after a resize
+    (anchor_reset) it clears and repaints.
     """
 
     def __init__(self, fd: int) -> None:
-        """No frame drawn yet; the first render anchors at row 1."""
+        """No frame painted yet."""
         self.fd      = fd
         self.row     = None   # anchor row, 1-based
         self.last_h  = 0
@@ -1299,14 +1352,6 @@ class _Widget:
         redraws from scratch next render."""
         self.row   = None
         self._full = True
-
-    def refresh(self) -> None:
-        """Repaint every row next render *without* clearing first.
-
-        For a stale-but-correctly-sized screen (regaining focus, a background
-        track change), where a clear would only add a visible blank flash.
-        """
-        screen_invalidate()
 
     def render(self, lines: list) -> None:
         """Paint `lines` from row 1, diffed against what is already on screen.
@@ -1377,32 +1422,7 @@ class _Widget:
 _register_screen_hooks()
 
 
-def _demo() -> None:
-    """Self-check for the pure (non-interactive) logic in this module, the
-    parts that run without a terminal. Doesn't touch raw mode, key reading,
-    or screen painting (those need a real tty).
-    Run directly: `python3 -m backbone.prompt_core`.
-    """
-    assert _norm(["a", "b"])[0].title == "a"
-    assert _norm([{"name": "x", "value": 1}])[0].value == 1
-    c = Choice("t", value=5, checked=True)
-    assert c.value == 5 and c.checked
-
-    cols = [Column(flex=True, min_width=4), Column(pin=True, min_width=3)]
-    rows = [["short", "1"], ["a much longer title here", "22"]]
-    widths = _table_widths(rows, cols, eff=40, pointer_w=4, right_margin=0)
-    assert all(w >= 0 for w in widths), widths
-
-    assert block_cursor_width("abc", 1) == 3
-    assert block_cursor_width("abc", 5) == 4
-
-    assert _split_columns("Title [Type] | value")[:3] == ("Title", "Type", "value")
-
-    tokens = _hint_key_tokens("↑↓")
-    assert [t[2] for t in tokens] == ["UP", "DOWN"]
-    assert _hint_key_tokens("^N") == [(0, 2, "\x0e")]
-
-    print("backbone.prompt_core self-check OK")
+hint = _hint   # the public name for the hint bar
 
 
 def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=None,
@@ -1464,6 +1484,32 @@ def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=No
 
     if on_quit is not None:
         on_quit()
+
+
+def _demo() -> None:
+    """Self-check for the pure (non-interactive) logic in this module, the
+    parts that run without a terminal. Doesn't touch raw mode, key reading,
+    or screen painting (those need a real tty).
+    Run directly: `python3 -m backbone.prompt_core`.
+    """
+    assert _norm(["a", "b"])[0].title == "a"
+    assert _norm([{"name": "x", "value": 1}])[0].value == 1
+    c = Choice("t", value=5, checked=True)
+    assert c.value == 5 and c.checked
+
+    cols = [Column(flex=True, min_width=4), Column(pin=True, min_width=3)]
+    rows = [["short", "1"], ["a much longer title here", "22"]]
+    widths = _table_widths(rows, cols, eff=40, pointer_w=4, right_margin=0)
+    assert all(w >= 0 for w in widths), widths
+
+    assert block_cursor_width("abc", 1) == 3
+    assert block_cursor_width("abc", 5) == 4
+
+    tokens = _hint_key_tokens("↑↓")
+    assert [t[2] for t in tokens] == ["UP", "DOWN"]
+    assert _hint_key_tokens("^N") == [(0, 2, "\x0e")]
+
+    print("backbone.prompt_core self-check OK")
 
 
 if __name__ == "__main__":

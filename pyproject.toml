@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "backbone"
 version = "0.1.0"
-description = "Shared terminal UI for the back* tools - colours, margins, box drawing, meters, prompt widgets and live views, implemented once."
-requires-python = ">=3.9"
+description = "Shared code for the back* tools: terminal UI, prompt widgets, live views, logging, dates, settings plumbing and small file helpers, implemented once."
+requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = []
 
 [tool.setuptools]
-packages = ["backbone"]
+packages = ["backbone", "backbone.prompt"]

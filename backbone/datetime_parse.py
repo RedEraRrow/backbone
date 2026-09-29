@@ -1,10 +1,9 @@
-"""datetime_parse.py - one parser for dates and times typed by hand.
+"""One parser for every hand-typed date: the calendar, the date/time editor,
+the schedule table, filename values.
 
-The calendar and date/time widgets use it, and a host app should use it for
-any other hand-typed date, so that every place accepts the same input.
-:func:`parse_datetime` accepts what a person plausibly types, keeps whatever
-precision was given, and says *why* when it can't read something so the
-caller can show that rather than a bare failure.
+Everything goes through :func:`parse_datetime`.  It accepts what a person
+plausibly types, keeps whatever precision was given, and says *why* when it can't
+read something so the caller can show that rather than a bare failure.
 
 Accepted, all with ``-``, ``/`` or ``.`` between the parts and zero-padding
 optional::
@@ -14,10 +13,10 @@ optional::
     2008-07-02 18:30  2008-07-02T18:30  2008-07-02 18:30:45
 
 A time may follow the date after a ``T`` (either case) or a space, as ``HH:MM``
-or ``HH:MM:SS``.  A trailing timezone (``Z`` or ``±HH:MM``) is stripped: times
-are taken as local wall-clock time.
+or ``HH:MM:SS``.  A trailing timezone (``Z`` or ``±HH:MM``) is stripped: the
+tags Backtrack writes are local wall-clock timestamps.
 
-Day-first vs month-first (``02/07/2008``) is truly ambiguous and is resolved
+Day-first vs month-first (``02/07/2008``) is ambiguous and is resolved
 only when the caller says how, via ``dayfirst``.  Left unset, an ambiguous date
 is refused rather than guessed, because guessing wrong writes a plausible-looking
 wrong date that nobody notices.
@@ -39,7 +38,7 @@ PRECISIONS = ('year', 'month', 'day', 'minute', 'second')
 _YEAR_FIRST_RE = re.compile(r'^(\d{4})(?:[-/.\s](\d{1,2})(?:[-/.\s](\d{1,2}))?)?$')
 # ISO basic form, 20080702.
 _COMPACT_RE = re.compile(r'^(\d{4})(\d{2})(\d{2})$')
-# Day- or month-first, e.g. 02/07/2008: order decided by `dayfirst`.
+# Day- or month-first, e.g. 02/07/2008, order decided by `dayfirst`.
 _YEAR_LAST_RE = re.compile(r'^(\d{1,2})[-/.\s](\d{1,2})[-/.\s](\d{4})$')
 # A trailing timezone we drop rather than try to honour.
 _TZ_RE = re.compile(r'(Z|[+-]\d{2}:?\d{2})$', re.IGNORECASE)
@@ -66,10 +65,6 @@ class ParsedDateTime(NamedTuple):
     def ok(self) -> bool:
         """True if the input parsed."""
         return not self.error
-
-    def iso(self) -> str:
-        """Render back at the precision that was given ('2008', '2008-07-02 18:30:00')."""
-        return format_datetime(self)
 
 
 def parse_time(raw) -> Optional[str]:
@@ -101,7 +96,7 @@ def _split_date_time(s: str) -> tuple:
     """Split a stamp into its date and time halves.
 
     A ``T`` always separates them.  A space only does when what follows it looks
-    like a clock time (it carries a ``:``), because a space is *also* a legal
+    like a clock time (it carries a ``:``) because a space is *also* a legal
     separator inside the date itself: ``2008 07 02`` is a date, while
     ``2008-07-02 18:30`` is a date and a time.
     """
@@ -114,6 +109,11 @@ def _split_date_time(s: str) -> tuple:
         if ':' in tail:
             return head.strip(), tail.strip()
     return s.strip(), ''
+
+
+def split_stamp(raw) -> tuple:
+    """The date and time halves of a typed stamp, any trailing timezone dropped."""
+    return _split_date_time(_TZ_RE.sub('', str(raw or '').strip()).strip())
 
 
 def _read_date(part: str, dayfirst: Optional[bool]) -> tuple:
@@ -140,11 +140,11 @@ def _read_date(part: str, dayfirst: Optional[bool]) -> tuple:
         day_first_ok = 1 <= b <= 12
         month_first_ok = 1 <= a <= 12
         if day_first_ok and month_first_ok:
-            # Ambiguous: 02/07/2008 is 2 July or 2 February depending
+            # Genuinely ambiguous: 02/07/2008 is 2 July or 2 February depending
             # on where you live. Honour an explicit choice, else refuse rather
             # than pick one and be silently wrong.
             if dayfirst is None:
-                return None, '', (f"{part!r} could be day-first or month-first; "
+                return None, '', (f"{part!r} could be day-first or month-first: "
                                   "write it year-first (2008-07-02)")
             day, month = (a, b) if dayfirst else (b, a)
         elif day_first_ok:
@@ -177,11 +177,10 @@ def parse_datetime(raw, *, dayfirst: Optional[bool] = None) -> ParsedDateTime:
     """
     if raw is None:
         return ParsedDateTime(None, None, '', 'no date given')
-    s = _TZ_RE.sub('', str(raw).strip()).strip()
-    if not s:
+    date_part, time_part = split_stamp(raw)
+    if not date_part:
         return ParsedDateTime(None, None, '', 'no date given')
 
-    date_part, time_part = _split_date_time(s)
     date, precision, err = _read_date(date_part, dayfirst)
     if err:
         return ParsedDateTime(None, None, '', err)
