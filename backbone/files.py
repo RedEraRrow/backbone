@@ -34,3 +34,28 @@ def backup_copy(path) -> str | None:
     dest = path + ".bak"
     shutil.copy2(path, dest)
     return dest
+
+
+def log_line(path, message: str) -> None:
+    """Print `message` with a timestamp and append the same line to the log at
+    `path`: a daemon's running record, readable on screen and afterwards."""
+    from datetime import datetime
+    line = f"{datetime.now():%Y-%m-%d %H:%M:%S}  {message}"
+    print(line)
+    with open(path, "a") as f:
+        f.write(line + "\n")
+
+
+def disk_free(path) -> str:
+    """Free space on `path`'s volume as `df -h` shows it, or "?"."""
+    import subprocess
+    try:
+        lines = subprocess.run(["df", "-h", os.fspath(path)], capture_output=True, text=True, timeout=10).stdout.splitlines()
+    except (OSError, subprocess.TimeoutExpired):
+        return "?"
+    return lines[-1].split()[3] if len(lines) > 1 else "?"
+
+
+def count_entries(d) -> int:
+    """How many entries the folder `d` holds, 0 if it doesn't exist."""
+    return len(os.listdir(d)) if os.path.isdir(d) else 0
