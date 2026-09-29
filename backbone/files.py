@@ -1,4 +1,4 @@
-"""Writing files so a crash mid-write can't leave them truncated."""
+"""Files: atomic writes and backups, a daemon's timestamped log, free space and folder counts."""
 import os
 import shutil
 import tempfile

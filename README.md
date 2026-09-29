@@ -1,27 +1,26 @@
 # backbone
 
-One visual language for the back* tools, implemented once: colours,
-margins, box drawing, meters, prompt widgets and a live-view loop, so a list
-in one tool looks and behaves like a list in another. backcrack's `watch`
-draws itself with it. backtrack declares it as a dependency but doesn't
-import anything from it yet.
+Everything the back* tools share, written once: colours, margins, box
+drawing, meters, prompt widgets and a live-view loop, so a list in one tool
+looks and behaves like a list in another, plus the plumbing underneath (logging,
+dates, CLI output, atomic files, background processes, notifications). backtrack
+and backcrack both build on it, and a new tool should too: anything that isn't
+specific to one tool's job belongs here.
 
-Python, stdlib only - no third-party packages at all. Requires Python 3.9+.
+Python, stdlib only - no third-party packages at all. Requires Python 3.10+.
 
 This is a library, not a tool. It has no entry points of its own; something
 else imports it.
 
 ## Install
 
-Not on PyPI. It's installed from this checkout, editable:
+Not on PyPI. backtrack and backcrack each name it by its GitHub URL, so
+installing either one pulls it in. To work on it, install this checkout
+editable first, so edits here take effect immediately with no reinstall:
 
     pip3 install -e .
 
-backcrack and backtrack each declare it as a `file:` dependency at this
-checkout's absolute path, so installing either one pulls it in, and pip sees
-the requirement already satisfied for the second. Install it yourself first
-anyway: that way it is the editable install, and edits here take effect
-immediately, no reinstall.
+pip then sees the requirement already satisfied and leaves it.
 
 ## What's in it
 
@@ -59,6 +58,38 @@ can't swallow a quit.
 **`datetime_parse`** - one date and time parser for everything that reads a
 hand-typed date, keeping whatever precision was given and saying why when it
 can't read something.
+
+**`app`** - who is running. A tool calls `app.configure("name", config_dir)`
+once at startup (from its config module); the log file and the hints toggle
+are kept in that folder, named after the tool.
+
+**`log`** - the diagnostics log, `<config_dir>/<name>.log`, off until the
+tool calls `log.configure(True)`. `from backbone.log import log` to write to
+it, and `with quietly():` to carry on past an error on purpose while still
+logging it.
+
+**`output`** - a CLI's one output path: `table`, `record`, `event`, `note`,
+`fail`, drawn as human text on a terminal or JSON / NDJSON with `--json`, and
+the exit codes that go with them.
+
+**`files`** - `write_text_atomic`, `backup_copy`, `log_line` (a daemon's
+timestamped line, printed and appended to its log), `disk_free`,
+`count_entries`.
+
+**`procs`** - a tool's own background processes: `spawn_script` starts one
+detached, `find_processes` / `stop_processes` find or SIGTERM them by name
+however they were started (directly, through `python3`, or through a launcher
+command given as `launcher=`), `ps_listing` for the raw process table.
+
+**`notify`** - `ntfy(server, topic, title, message)` pushes to a phone in the
+background, doing nothing without a topic; `chime()` plays a sound at the
+machine.
+
+**`timefmt`**, **`numbering`**, **`keyboard`**, **`terminal_input`** - clock
+and SRT timestamps; arabic, roman or written-out numbers; the keyboard layout
+family (for typo scoring); raw key reads and escape decoding.
+
+**`tz_widget`** - a full-screen world-map timezone picker.
 
 ## Live views
 
@@ -100,10 +131,10 @@ clip later can't cut an oversized frame apart mid-border.
 `set_status(task_id, message)` registers running background work, which shows
 in the status line as a pulsing beacon until the id is cleared. `show_status`
 is the transient one-line toast. `set_footer_provider(fn)` registers a
-persistent box drawn above the status line, such as a now-playing bar;
-register nothing and no box is drawn. `prompt` also has optional hooks for
-a host app's playback keys and player view (`set_transport_handler`,
-`set_player_opener`, `set_notification_opener`), unused unless registered.
+persistent box drawn above the status line, such as backtrack's now-playing
+bar; register nothing and no box is drawn. `prompt` also has optional hooks
+for a host app's playback keys and player view (`set_transport_handler`,
+`set_player_opener`), unused unless registered.
 
 ## Self-checks
 
@@ -115,3 +146,7 @@ Two modules check their own pure logic, no terminal needed:
 Both print an OK line. They cover the parts that run without a terminal:
 sizing, measuring, truncation, table widths, hint parsing. Raw mode,
 key reading and screen painting need a real tty and are not covered.
+
+The tests in `tests/` each run on their own:
+
+    for f in tests/test_*.py; do python3 "$f"; done
