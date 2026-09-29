@@ -330,10 +330,10 @@ def _cols() -> int:
 
 
 
-def _hint(*pairs, extra="") -> str:
-    """
-    Highly adaptive layout engine for bottom hints.
-    Cascades: Centred Long Line -> Pyramid -> Grid -> Aligned Vertical Stack -> Split Vertical Stack.
+def hint(*pairs, extra="") -> str:
+    """The footer hint bar for `pairs` of (key, label), laid out to fit the
+    terminal width. Tries, in order: one centred line, an upside-down
+    pyramid, a grid, an aligned vertical stack, a split vertical stack.
     """
     if not pairs and not extra:
         return ""
@@ -469,6 +469,10 @@ def _hint(*pairs, extra="") -> str:
 
     return "\n".join(split_lines)
 
+
+_hint = hint   # the name prompt.py and older callers use
+
+
 # --- Clickable hints & now-playing box hit-testing -------------------------
 # Hint keys render as ``[key] label`` with only ``key`` bold/bright; a click is
 # actionable only when it lands on those bright glyphs. Multi-key labels split
@@ -482,6 +486,7 @@ _HINT_WORDS = {
     'space': 'SPACE', 'spc': 'SPACE', 'esc': 'ESC', 'tab': 'TAB', '↵': 'ENTER',
     'pgup': 'PGUP', 'pgdn': 'PGDN', '⇧tab': 'BACKTAB', 'home': 'HOME', 'end': 'END',
 }
+
 
 
 def _hint_key_tokens(key: str) -> list[tuple[int, int, str]]:
@@ -1391,10 +1396,6 @@ def _demo() -> None:
     print("backbone.prompt_core self-check OK")
 
 
-if __name__ == "__main__":
-    _demo()
-
-
 def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=None,
                   poll: float = 0.05, on_key=None) -> None:
     """Drives a live, tick-driven terminal dashboard through the exact same
@@ -1472,3 +1473,7 @@ def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=No
 
     if on_quit is not None:
         on_quit()
+
+
+if __name__ == "__main__":
+    _demo()
