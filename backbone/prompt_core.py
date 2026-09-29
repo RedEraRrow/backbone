@@ -1,4 +1,19 @@
-"""Terminal primitives shared across prompt widgets."""
+"""prompt_core.py - the terminal machinery under every prompt widget.
+
+- The screen painter: one model of what each screen row shows
+  (`screen_paint`, `screen_row_paint`), so a repaint writes only the rows
+  that changed, in one flush. `_Widget` paints a widget's frame through it.
+- Key reading: raw mode, and `_read_key` turning escape sequences, mouse
+  clicks and focus events into key names ('UP', 'PGDN', 'MOUSE_CLICK:...').
+- `Choice` and `Column`, the list and table types behind select(), and the
+  table layout that fits columns to the terminal width.
+- The footer hint bar (`hint`) and the mapping from a click on one of its
+  keys back to that key (`add_hint_click_cells`, `footer_click_action`).
+- The footer box and status bar repaints on idle ticks.
+- `run_dashboard`, the loop for a live, tick-driven view.
+
+`python3 -m backbone.prompt_core` runs the self-check.
+"""
 from __future__ import annotations
 import re
 import sys
@@ -54,7 +69,7 @@ _footer_last_draw = [0.0]
 _status_prev_active = [False]            # was a background task shown last idle tick?
 
 # Self-pipe so background threads can wake the menu poll to repaint the box the
-# instant playback state changes (#14) — see ui_utils.pulse_footer(). The
+# instant its content changes — see ui_utils.pulse_footer(). The
 # poll's select() watches the read end alongside stdin; a pulse makes it return
 # immediately and repaint, rather than waiting on the next keystroke or timeout.
 try:
@@ -108,11 +123,11 @@ _takeover_pending = [False]
 def screen_takeover_next() -> None:
     """Take the screen over on the next frame *without* clearing it first.
 
-    Called where a widget used to clear on entry: the next paint overwrites the
-    rows it needs and blanks whatever the previous screen left behind, in the
-    same flush. That removes the blank flash between every screen — a clear is
-    only genuinely needed when the terminal reflowed (resize) or something
-    painted outside this model.
+    Called on entering a widget instead of clearing: the next paint overwrites
+    the rows it needs and blanks whatever the previous screen left behind, in
+    the same flush, so there is no blank flash between screens. A clear is
+    only needed when the terminal reflowed (resize) or something painted
+    outside this model.
     """
     _takeover_pending[0] = True
 
@@ -242,7 +257,7 @@ def footer_box_segment() -> str:
 
 def invalidate_footer_box() -> None:
     """Drop the last-drawn box cache so the next idle tick repaints unconditionally.
-    Used on focus-in (#14): while a window is unfocused the terminal may not paint
+    Used on focus-in: while a window is unfocused the terminal may not paint
     our box writes, yet the cache advances as if it had — leaving the box stale
     after refocus until an interaction. Forcing a repaint fixes it without a click."""
     _footer_prev_lines[0] = None
@@ -254,7 +269,7 @@ def _render_footer_bar() -> None:
     """Idle-tick refresh so the clock/progress advance (and a background track
     change lands) when nothing else redraws. Repaints when either the track
     identity or the styled rows changed, so an idle screen never flickers yet a
-    new song is never missed (#14)."""
+    new song is never missed."""
     rows = ui_utils.get_terminal_height()
     cols = ui_utils.get_terminal_width()
     lines = ui_utils.footer_lines(cols)
@@ -272,7 +287,7 @@ def _render_footer_bar() -> None:
 def _wait_for_keypress(timeout: float = 0.05) -> bool:
     """Block up to `timeout` seconds for a keypress; return whether one arrived.
 
-    Also refreshes the now-playing box (#14) at ~4 Hz so background-audio status
+    Also refreshes the footer box at ~4 Hz so background-audio status
     stays live on every widget/menu without each one needing its own tick."""
     now = time.time()
     if now - _footer_last_draw[0] >= 0.12:
@@ -462,7 +477,7 @@ def hint(*pairs, extra="") -> str:
         v_pad = max(0, cols - len(v)) // 2
         split_lines.append(f"{' ' * v_pad}{C.DIM}{v}{C.RESET}")
 
-        # Add centered separator dot between discrete blocks
+        # Add centred separator dot between discrete blocks
         if i < total_items - 1:
             dot_pad = max(0, cols - 1) // 2
             split_lines.append(f"{' ' * dot_pad}{C.DIM}⋅{C.RESET}")
@@ -617,9 +632,8 @@ class Choice:
         self.cursor_title = cursor_title  # alternate label shown when cursor is on this row
 
 
-# The single inter-column gap for every list in the app. Lists used to mix 2 and
-# 3 — the duration column sat a column closer to the edge in search and history
-# than in browse. Narrow terminals are handled by column `priority` (columns drop)
+# The single inter-column gap for every list, so columns line up the same in
+# every one. Narrow terminals are handled by column `priority` (columns drop)
 # and by the dynamically computed pin gap, not by varying this.
 COL_GAP = 3
 
@@ -855,7 +869,7 @@ def _table_widths(rows_cells: list, columns: list, eff: int,
         # Over budget: shave the widest kept column repeatedly until it fits,
         # never below its floor (min_width, a readable minimum, or its own
         # content if that is already smaller). The readable minimum eases toward
-        # the fair per-column share when a many-column row is genuinely cramped,
+        # the fair per-column share when a many-column row is really cramped,
         # so the layout still fits. n and the deficit are both small.
         floor_cap = min(_MIN_COL_FLOOR, max(1, budget // len(kept)))
         floors = {i: min(widths[i], max(columns[i].min_width, floor_cap)) for i in kept}
@@ -1063,7 +1077,7 @@ def _style_checkbox_label(label_text: str, is_current: bool, is_dimmed: bool) ->
 
 
 def _norm(choices: list) -> list:
-    """Normalize a mixed list of Choice/str/dict/choice-like objects into Choice instances."""
+    """Normalise a mixed list of Choice/str/dict/choice-like objects into Choice instances."""
     out = []
     for c in choices:
         if isinstance(c, Choice):
@@ -1174,10 +1188,7 @@ def _read_key_raw(fd: int) -> str:
                         buf += c
                     return 'ESC'
                 if seq.isdigit():
-                    # ESC [ <number> ~ — page/home/end/delete/insert. This used
-                    # to swallow four bytes and report 'ESC', so PgUp and PgDn
-                    # acted as "back" (the 5/6 entries in the table below were
-                    # dead code, never reached).
+                    # ESC [ <number> ~ : page/home/end/delete/insert.
                     num, term = seq, ''
                     while len(num) < 4 and _byte_ready(fd, _ESC_SEQ_TIMEOUT):
                         c = os.read(fd, 1).decode('utf-8', errors='replace')
@@ -1239,8 +1250,8 @@ def _visible_rows() -> int:
     OWN chrome (header, message, indicators, hints) — do not double-count it
     here, or lists show a premature "N more" (they did, by ~5–7 rows)."""
     _, rows = ui_utils.get_terminal_size()
-    # Reserve the status-bar row, plus the now-playing box's rows (#14) whenever
-    # background audio is active, so lists never collide with it.
+    # Reserve the status-bar row, plus the footer box's rows whenever one is
+    # shown, so lists never collide with it.
     reserve = 1 + ui_utils.footer_height()
     return max(4, rows - reserve - 2 * ui_utils.MARGIN_V)
 
@@ -1269,16 +1280,15 @@ def _wrap_bordered_input_lines(text: str, content_width: int) -> list[str]:
 
 class _Widget:
     """
-    Renders a list of lines anchored to an absolute terminal row.
+    Renders a list of lines from row 1 of the screen, through the painter.
 
-    On first draw it queries the current cursor row and uses that as the
-    anchor. On resize it clears the entire screen and redraws from scratch —
-    this is the only reliable way to prevent ghost lines when the terminal
-    reflows content and changes the effective cursor position.
+    Its first frame takes the screen over without clearing it. After a resize
+    (anchor_reset) it clears the whole screen and redraws from scratch, the
+    only reliable way to prevent ghost lines once the terminal has reflowed.
     """
 
     def __init__(self, fd: int) -> None:
-        """No anchor row yet — it's queried and fixed on the first render."""
+        """No frame drawn yet; the first render anchors at row 1."""
         self.fd      = fd
         self.row     = None   # anchor row, 1-based
         self.last_h  = 0
@@ -1353,8 +1363,7 @@ class _Widget:
     def clear(self) -> None:
         """Clear the screen and reset anchor state, cursor still hidden.
 
-        It used to show the cursor here, which left it blinking at home until the
-        next screen painted. The cursor is only ever shown for a text caret, or by
+        The cursor is only ever shown for a text caret, or by
         `ui_utils.exit_alt_screen()` when the app hands the terminal back.
         """
         sys.stdout.write("\033[H\033[3J\033[J" + C.HIDE)
@@ -1369,9 +1378,9 @@ _register_screen_hooks()
 
 
 def _demo() -> None:
-    """ponytail: self-check for the pure (non-interactive) logic in this
-    module - the parts a terminal-less CI run can actually exercise. Doesn't
-    touch raw mode, key reading, or screen painting (those need a real tty).
+    """Self-check for the pure (non-interactive) logic in this module, the
+    parts that run without a terminal. Doesn't touch raw mode, key reading,
+    or screen painting (those need a real tty).
     Run directly: `python3 -m backbone.prompt_core`.
     """
     assert _norm(["a", "b"])[0].title == "a"
@@ -1398,43 +1407,25 @@ def _demo() -> None:
 
 def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=None,
                   poll: float = 0.05, on_key=None) -> None:
-    """Drives a live, tick-driven terminal dashboard through the exact same
-    machinery every select()/confirm()/etc. widget in this module uses -
-    not a bespoke one-off. Every back* tool's own live view (backcrack's
-    `watch`, say) used to hand-roll a full-rewrite-every-tick loop; this
-    drives a _Widget instead, so a resize is handled the way the rest of
-    the suite handles it (`if ui_utils.consume_resize(): ui_utils.clear_screen();
-    w.anchor_reset()` - one hard clear-and-redraw, then back to the normal
-    diffed paint) and an unchanged tick costs nothing extra.
+    """Runs a live, tick-driven view through a _Widget, so it resizes and
+    paints like every other widget here. Returns when `quit_key` is pressed.
 
-    `interval` and `poll` are deliberately separate: `render()` (a rescan of
-    discs, a subprocess call, whatever `interval` is meant to pace) only
-    runs once every `interval` seconds, but resize/keypress are checked
-    every `poll` seconds (default 0.05s, matching every other widget in this
-    module) regardless - tying both to `interval` (a dashboard's own data-
-    refresh cadence, often 1s+) is what used to make a resize or a 'q'
-    take up to a whole `interval` to register. A resize always forces an
-    immediate render at the new size, whichever cadence it lands between.
+    `render()` takes no arguments and returns the whole frame as a list of
+    lines, each carrying its own left-margin indent (see header_box()). It
+    runs once every `interval` seconds; keypresses and resizes are checked
+    every `poll` seconds regardless, and a resize renders at once.
 
-    `render()` takes no arguments and returns the frame as a plain list of
-    lines, each already carrying its own left-margin indent (the same
-    convention every hand-written widget line uses - see header_box()).
-    `on_quit()`, if given, runs after the terminal is restored to normal
-    (cursor back, raw mode undone) - the natural place for a "stop the
-    background work too?" confirm().
+    `on_key(key)`, if given, is called for any other keypress (e.g. "s" for
+    a settings screen). It may open select()/text()/confirm() itself; the
+    view is cleared and redrawn when it returns.
 
-    `on_key(key)`, if given, is called for any keypress other than
-    `quit_key` (e.g. "s" for a settings screen). It's free to call
-    select()/text()/confirm() etc. itself - each of those widgets manages
-    its own raw mode and screen takeover, so nesting one inside here just
-    works. The dashboard forces a full clear-and-redraw right after it
-    returns, the same way a resize does, since on_key's widget almost
-    certainly left the screen in a different state.
+    `on_quit()`, if given, runs after the terminal is restored (cursor
+    back, raw mode undone) - the place for a "stop the background work
+    too?" confirm().
 
-    Not a tty (piped output, a redirected log): renders on a plain
-    time.sleep(interval) loop instead and never checks for `quit_key` -
-    there is no key to read, so the caller must be killed externally, same
-    as the daemons it may be watching.
+    When stdin is not a terminal, keys can't be read: it renders on a plain
+    time.sleep(interval) loop and never checks for `quit_key`, so the
+    caller has to be stopped from outside.
     """
     fd = sys.stdin.fileno()
     is_tty = sys.stdin.isatty()

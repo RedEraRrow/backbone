@@ -1,15 +1,16 @@
-"""
-Terminal prompt widgets — resize-aware replacements for questionary.
+"""prompt.py - the terminal prompt widgets: select, confirm, text, path and
+the rest listed in the README ("What's in it"). All resize-aware and
+mouse-aware, all drawn through prompt_core's painter.
 
-API:
-    prompt.select(message, choices)               -> value | None
-    prompt.select(message, choices, multi=True)   -> [value, ...] | None
-    prompt.confirm(message)                       -> bool
-    prompt.text(message, default="")     -> str | None
-    prompt.path(message)                 -> str | None
-
-choices can be plain strings, dicts with 'name'/'value'/'checked',
+select()'s choices can be plain strings, dicts with 'name'/'value'/'checked',
 or objects with .title / .value attributes.
+
+A host app can hook in optional behaviour that backbone itself never
+triggers: a raw-text toggle for value editors (_value_toggle_enabled),
+and playback keys and a player view (set_player_opener,
+set_transport_handler), plus a notification view for the status-bar
+beacon (set_notification_opener). Nothing is registered by default, and
+unregistered hooks are neither shown nor bound.
 """
 from __future__ import annotations
 import re
@@ -41,9 +42,10 @@ from . import nav as _state
 from .nav import QuitToTerminal
 C = ui_utils.Colors
 
-# Per-edit "raw text ↔ smart widget" toggle (#62). prompt_for_value enables the
-# flag around a value edit; the value widgets then treat Ctrl-T as a request to
-# switch modes by returning MODE_TOGGLE, and advertise it in their hint bar.
+# Optional host-app hook: a per-edit "raw text ↔ smart widget" toggle. A host
+# sets _value_toggle_enabled around a value edit; the value widgets then treat
+# Ctrl-T as a request to switch modes by returning MODE_TOGGLE, and advertise
+# it in their hint bar.
 MODE_TOGGLE = object()
 
 
@@ -62,9 +64,10 @@ _value_toggle_enabled = False
 _toggle_hint_label = 'widget'      # what text()'s ^t hint calls the alternate mode
 _toggle_carry: str | None = None   # in-progress text buffer handed across a Ctrl-T toggle
 
-# Global playback hotkeys, live from any list/menu while background audio plays
-# (#14). Ctrl-O reopens the full player; Ctrl-P/N/B are transport. Routed through
-# registered callbacks so prompt need not import the playback layer.
+# Optional host-app hooks: global playback hotkeys, live from any list/menu while
+# the footer box is showing. Ctrl-O opens the host's player view; Ctrl-P/N/B are
+# transport. They do nothing until a host registers set_player_opener /
+# set_transport_handler, so backbone needs no playback code of its own.
 _PLAYER_KEY    = '\x0f'            # Ctrl-O — open the full player view
 _PLAYPAUSE_KEY = '\x10'           # Ctrl-P — play / pause
 _NEXT_KEY      = '\x0e'           # Ctrl-N — next track
@@ -74,7 +77,8 @@ _transport_handler = None
 
 
 def set_player_opener(fn) -> None:
-    """Register a ``callable()`` that opens the background player's full view."""
+    """Optional host-app hook: register a ``callable()`` that opens the host's
+    full player view (Ctrl-O, or a click on the footer box)."""
     global _player_opener
     _player_opener = fn
 
@@ -84,8 +88,7 @@ def set_player_opener(fn) -> None:
 # miniplayer and status bar so its keys never move, those keys clickable, the
 # background-audio transport keys listed whenever the miniplayer is up, and
 # clicks on the miniplayer box itself doing something. These two helpers are
-# that contract in one place — `select` grew all of it first and the rest of the
-# app had drifted, each widget missing a different subset.
+# that contract in one place, so every widget gets all of it.
 
 CHROME_HANDLED = object()      # the key was consumed; carry on with the loop
 CHROME_REDRAW = object()       # consumed, and the caller should repaint fully
@@ -204,9 +207,8 @@ def disable_mouse() -> None:
 
 
 def set_transport_handler(fn) -> None:
-    """Register ``callable(action)`` for the global transport hotkeys, where
-    action is 'playpause', 'next', or 'prev'. Kept as a registered callback so
-    prompt need not import the playback layer (mirrors set_player_opener)."""
+    """Optional host-app hook: register ``callable(action)`` for the global
+    transport hotkeys, where action is 'playpause', 'next', or 'prev'."""
     global _transport_handler
     _transport_handler = fn
 
@@ -215,8 +217,8 @@ _notification_opener = None
 
 
 def set_notification_opener(fn) -> None:
-    """Register a ``callable()`` that opens the activity/notification centre —
-    invoked when the status-bar ● beacon is clicked."""
+    """Optional host-app hook: register a ``callable()`` that opens the host's
+    activity/notification view, called when the status-bar ● beacon is clicked."""
     global _notification_opener
     _notification_opener = fn
 
@@ -641,7 +643,7 @@ def select(message: str, choices: list, *,
             elif key == 'FOCUS_IN':
                 # Regained focus: repaint fully in case a background track change
                 # (or the terminal not painting us while unfocused) left the list
-                # or now-playing box stale — no click needed (#14). A refresh, not
+                # or now-playing box stale — no click needed. A refresh, not
                 # a clear: the layout is still valid, so blanking the screen first
                 # would just flash.
                 _sel_last_click = None; w.refresh(); w.render(_lines())
@@ -3449,7 +3451,7 @@ _RVA2_COARSE   = 3.0
 def _rva2_render_lines(gain: float, message: str, avail: int | None = None) -> list[str]:
     """Narrow vertical gain meter: 1 row per dB, half-block for 0.5 dB precision.
 
-    Each row at integer `db` is centered on that dB value and spans ±0.5 dB:
+    Each row at integer `db` is centred on that dB value and spans ±0.5 dB:
       Boost rows (db > 0): bar fills upward; ▄ lights first (bottom half, at gain ≥ db−0.5),
                            then █ when gain ≥ db.
       Cut rows  (db < 0): bar fills downward; ▀ lights first (top half, at gain ≤ db+0.5),
@@ -3862,7 +3864,7 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
         else:
             status = f"{C.DIM}no bands — [a] add one{C.RESET}"
         # Size the plot to the rows left above the pinned hint bar and the
-        # miniplayer, not to the whole terminal — it used to draw over both.
+        # miniplayer, not to the whole terminal, so it never draws over them.
         _pairs = [("↑↓", "gain"), ("←→", "band"), ("⇞⇟", "±3"), ("a", "add"),
                   ("d", "delete"), ("0", "zero"), ("f", "flat"), ("p", "preset"),
                   ("↵", "save"), ("esc", "back"), ("q", "quit app")]

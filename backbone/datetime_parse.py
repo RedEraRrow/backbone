@@ -1,14 +1,10 @@
-"""One date/time parser for the whole project.
+"""datetime_parse.py - one parser for dates and times typed by hand.
 
-Backtrack reads dates typed by hand in several places — the calendar widget's
-manual entry, the combined date/time editor, the per-range schedule table, tag
-values arriving from a filename — and each had grown its own rules.  They
-disagreed: one accepted ``2008-7-2`` and another rejected it, one kept a time and
-another silently truncated it, and the two resolved ``02/07/2008`` differently.
-
-Everything now goes through :func:`parse_datetime`.  It accepts what a person
-plausibly types, keeps whatever precision was given, and says *why* when it can't
-read something so the caller can show that rather than a bare failure.
+The calendar and date/time widgets use it, and a host app should use it for
+any other hand-typed date, so that every place accepts the same input.
+:func:`parse_datetime` accepts what a person plausibly types, keeps whatever
+precision was given, and says *why* when it can't read something so the
+caller can show that rather than a bare failure.
 
 Accepted, all with ``-``, ``/`` or ``.`` between the parts and zero-padding
 optional::
@@ -18,10 +14,10 @@ optional::
     2008-07-02 18:30  2008-07-02T18:30  2008-07-02 18:30:45
 
 A time may follow the date after a ``T`` (either case) or a space, as ``HH:MM``
-or ``HH:MM:SS``.  A trailing timezone (``Z`` or ``±HH:MM``) is stripped — the
-tags Backtrack writes are local wall-clock timestamps.
+or ``HH:MM:SS``.  A trailing timezone (``Z`` or ``±HH:MM``) is stripped: times
+are taken as local wall-clock time.
 
-Day-first vs month-first (``02/07/2008``) is genuinely ambiguous and is resolved
+Day-first vs month-first (``02/07/2008``) is truly ambiguous and is resolved
 only when the caller says how, via ``dayfirst``.  Left unset, an ambiguous date
 is refused rather than guessed, because guessing wrong writes a plausible-looking
 wrong date that nobody notices.
@@ -144,7 +140,7 @@ def _read_date(part: str, dayfirst: Optional[bool]) -> tuple:
         day_first_ok = 1 <= b <= 12
         month_first_ok = 1 <= a <= 12
         if day_first_ok and month_first_ok:
-            # Genuinely ambiguous: 02/07/2008 is 2 July or 2 February depending
+            # Ambiguous: 02/07/2008 is 2 July or 2 February depending
             # on where you live. Honour an explicit choice, else refuse rather
             # than pick one and be silently wrong.
             if dayfirst is None:

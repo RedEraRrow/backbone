@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "backbone"
 version = "0.1.0"
-description = "Shared graphical/processing backbone for the back* suite (backtrack, backcrack, ...) - colors, margins, box-drawing, meters: one visual language, implemented once."
+description = "Shared terminal UI for the back* tools - colours, margins, box drawing, meters, prompt widgets and live views, implemented once."
 requires-python = ">=3.9"
 dependencies = []
 

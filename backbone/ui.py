@@ -1,12 +1,11 @@
-"""ui.py - shared terminal-UI primitives for the back* suite (backtrack,
-backcrack, ...): colors, sizing, ANSI-aware text measuring, the screen-diff
-painter, background-task/status-bar tracking, and a generic "footer box"
-hook (backtrack's now-playing bar, generalized - any tool can register a
-callable(width) -> list[str] to have a persistent box drawn above the
-status line; none is registered by default, so a tool that never calls
-set_footer_provider() simply never sees one).
+"""ui.py - terminal-UI primitives: colours, margins, meters, terminal size,
+ANSI-aware text measuring, background-task/status-bar tracking, and a
+"footer box" hook: a tool can register a callable(width) -> list[str] to
+have a persistent box drawn above the status line. None is registered by
+default, so a tool that never calls set_footer_provider() never sees one.
+The screen-diff painter that draws all this is in prompt_core.py.
 
-    NO_COLOR=1 - disables color everywhere that imports Colors from here.
+    NO_COLOR=1 - disables colour everywhere that imports Colors from here.
 """
 from __future__ import annotations
 import os
@@ -25,11 +24,10 @@ USE_COLOR = not os.environ.get("NO_COLOR") and sys.stdout.isatty()
 
 
 class Colors:
-    """Semantic short aliases (R/B/...) alongside backtrack's original named
-    palette (PRIMARY/ACCENT/...) - the prompt system ported from backtrack
-    references the named set directly; a tool's own live view can use
-    whichever reads better. Empty strings when USE_COLOR is False, so an
-    f-string using these never needs an `if USE_COLOR` guard.
+    """The named palette (PRIMARY/ACCENT/...) the prompt widgets use, some
+    semantic colours for a tool's own views (FRAME, TEAL, AMBER, RED, TXT,
+    MUTE), and the short aliases R and B. Empty strings when USE_COLOR is
+    False, so an f-string using these never needs an `if USE_COLOR` guard.
     """
     if USE_COLOR:
         PRIMARY = "\033[1;37m"   # bold white
@@ -48,7 +46,7 @@ class Colors:
         INVERT = "\033[7m"
         HIDE = "\033[?25l"
         SHOW = "\033[?25h"
-        # backcrack-style semantic additions with no backtrack equivalent
+        # semantic colours for a tool's own views; watch uses RED for failures
         FRAME = "\033[38;5;239m"
         TEAL = "\033[38;5;43m"
         AMBER = "\033[38;5;179m"
@@ -81,24 +79,8 @@ def spinner(frame: int) -> str:
 def content_width(min_width: int = 1) -> int:
     """Terminal columns available for content, after the global left+right
     margin - the width every box/bar in a frame should be drawn against.
-
-    No artificial floor beyond `min_width` (default 1, i.e. effectively
-    none) - matching backtrack's own _cols(): content is always sized
-    against the TRUE current width, however narrow. A floor pitched above
-    the real terminal width would size content for space that doesn't
-    exist; a caller's later hard safety-clip against the true width (see
-    watch.py's render()) would then cut that oversized content apart
-    mid-render - border corners and all - instead of letting it degrade
-    gracefully the way the per-field truncation is meant to.
-
-    Routed through get_terminal_width() (below) - the one cached,
-    SIGWINCH-invalidated source of truth for the terminal's size the whole
-    suite reads from, same as every prompt widget. Safe for a live,
-    tick-driven view specifically because such a view should be driven
-    through run_dashboard() (prompt_core.py), which checks consume_resize()
-    every tick and forces a hard clear-and-redraw the instant a resize
-    lands - the same pattern every other screen in the suite uses, not a
-    bespoke one-off.
+    No floor beyond `min_width`, so content is always sized against the real
+    width, however narrow.
     """
     return max(min_width, get_terminal_width() - 2 * MARGIN_H)
 
@@ -123,9 +105,10 @@ def bar(pct: int, width: int, color: str = "") -> str:
 def rate_of_change(history: list, now: float, value: float, window: float = 20.0, max_len: int = 60):
     """Tracks `value` over time in `history` (a list of (ts, value) pairs,
     mutated in place and capped to `max_len` entries) and returns its rate
-    of change per second over the last `window` seconds - None until
-    `window` seconds of history has accumulated (not yet measurable), so a
-    caller can show "measuring" instead of a misleadingly noisy early rate.
+    of change per second, measured from the oldest sample within the last
+    `window` seconds. None when there is no earlier sample in that window to
+    measure from (the first call, or after a gap longer than `window`), so
+    a caller can show "measuring" instead.
     """
     history.append((now, value))
     del history[:-max_len]
@@ -346,8 +329,8 @@ def clear_screen() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Footer box - a persistent box drawn just above the status line (backtrack's
-# now-playing bar, generalized). A tool registers set_footer_provider(fn),
+# Footer box - a persistent box drawn just above the status line, such as a
+# now-playing bar. A tool registers set_footer_provider(fn),
 # fn(width) -> list[str] | None; none registered means no box, ever.
 # ---------------------------------------------------------------------------
 
@@ -440,7 +423,7 @@ BACKGROUND_TASKS: dict = {}
 _toast_message: str = ""
 _toast_expiry: float = 0.0
 
-_PULSE_RAMP = (238, 243, 248, 253, 255, 253, 248, 243)   # dim -> white -> dim, 256-color
+_PULSE_RAMP = (238, 243, 248, 253, 255, 253, 248, 243)   # dim -> white -> dim, 256-colour
 
 
 def pulse_circle() -> str:
@@ -678,9 +661,8 @@ _ANSI_DEMO = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 
 
 def _demo() -> None:
-    """ponytail: self-check for header_box's alignment math - the one thing
-    in this module that has broken silently before (an off-by-one in a
-    hand-written pad formula). Run directly: `python3 -m backbone.ui`.
+    """Self-check for the pure logic here, header_box's alignment above all.
+    Runs without a terminal: `python3 -m backbone.ui`.
     """
     for cols in (70, 100, 137):
         for left, right, spin in (("  SHORT", "12:00:00  ", "X"), ("", "", ""), ("a" * 20, "b", "Y")):
