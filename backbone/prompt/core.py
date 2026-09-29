@@ -9,9 +9,9 @@ import time
 import select as _sel
 from typing import Any
 
-from backbone import ui as ui_utils
+from backbone import ui
 from backbone.log import log, enabled as _logging, quietly
-C = ui_utils.Colors
+C = ui.Colors
 
 _IS_WINDOWS = os.name == "nt"
 
@@ -55,7 +55,7 @@ _footer_last_draw = [0.0]
 _status_prev_active = [False]            # was a background task shown last idle tick?
 
 # Self-pipe so background threads can wake the menu poll to repaint the box the
-# instant playback state changes; see ui_utils.pulse_footer(). The
+# instant playback state changes; see ui.pulse_footer(). The
 # poll's select() watches the read end alongside stdin; a pulse makes it return
 # immediately and repaint, rather than waiting on the next keystroke or timeout.
 try:
@@ -76,7 +76,7 @@ def _poke_footer_wake() -> None:
 
 
 if _wake_r >= 0:
-    ui_utils.set_footer_waker(_poke_footer_wake)
+    ui.set_footer_waker(_poke_footer_wake)
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ def screen_invalidate() -> None:
     """Forget what is on screen: after a full clear, a resize, or a write by
     something that doesn't go through here (the player view). A clear at a new
     size (a screen answering a resize) counts as the resize wipe too."""
-    size = ui_utils.get_terminal_size()
+    size = ui.get_terminal_size()
     if _screen_size[0] is not None and size != _screen_size[0]:
         _note_resize(_screen_size[0], size)
         _screen_size[0] = size
@@ -115,14 +115,14 @@ def _note_resize(was: tuple, size: tuple) -> None:
     wide = sorted(r for r, key in _screen.items() if _row_width(key.split("\x00", 1)[0]) > size[0])
     log.debug("resize %sx%s -> %sx%s, repaint %.0f ms after the signal; %d old rows "
               "wider than the new width (rewrapped by the terminal): %s",
-              was[0], was[1], size[0], size[1], ui_utils.ms_since_resize_signal(),
+              was[0], was[1], size[0], size[1], ui.ms_since_resize_signal(),
               len(wide), wide[:20])
 
 
 def _resize_wipe() -> str:
     """"" normally; after a terminal resize, a full clear (and a forgotten
     model), so the frame being painted repaints everything."""
-    size = ui_utils.get_terminal_size()
+    size = ui.get_terminal_size()
     if size == _screen_size[0]:
         return ""
     was, _screen_size[0] = _screen_size[0], size
@@ -134,12 +134,12 @@ def _resize_wipe() -> str:
 
 def _row_width(text: str) -> int:
     """Visible width of a painted row, ignoring colour codes."""
-    return ui_utils.visual_len(ui_utils.strip_ansi(text))
+    return ui.visual_len(ui.strip_ansi(text))
 
 
 def _register_screen_hooks() -> None:
-    """Let `ui_utils.clear_screen()` (and the alt-screen switch) drop the model."""
-    ui_utils.set_screen_invalidator(screen_invalidate)
+    """Let `ui.clear_screen()` (and the alt-screen switch) drop the model."""
+    ui.set_screen_invalidator(screen_invalidate)
 
 
 _takeover_pending = [False]
@@ -196,7 +196,7 @@ def screen_row_paint(row: int, text: str, extra: str = "") -> str:
     _screen[row] = key
     if _logging() and _row_width(text) > (_screen_size[0] or (0, 0))[0]:
         log.warning("row %d painted %d wide in a %d-column window: %r", row,
-                    _row_width(text), _screen_size[0][0], ui_utils.strip_ansi(text)[:80])
+                    _row_width(text), _screen_size[0][0], ui.strip_ansi(text)[:80])
     return f"{wipe}\033[{row};1H\033[2K{text}{extra}"
 
 
@@ -239,7 +239,7 @@ def _footer_box_str(rows: int, lines: list) -> str:
     if rows <= 1:
         _footer_prev_h[0] = 0
         _footer_prev_lines[0] = []
-        _footer_prev_sig[0] = ui_utils.footer_signature()
+        _footer_prev_sig[0] = ui.footer_signature()
         return ""
 
     max_box_rows = max(0, rows - 1)
@@ -265,23 +265,23 @@ def _footer_box_str(rows: int, lines: list) -> str:
             parts.append(seg)
     _footer_prev_h[0] = h
     _footer_prev_lines[0] = lines
-    _footer_prev_sig[0] = ui_utils.footer_signature()
+    _footer_prev_sig[0] = ui.footer_signature()
     return "".join(parts)
 
 
 def footer_height_for_layout() -> int:
     """Rows the now-playing box occupies, as the frame layout should assume."""
-    return max(_footer_prev_h[0], ui_utils.footer_height())
+    return max(_footer_prev_h[0], ui.footer_height())
 
 
 def footer_box_segment() -> str:
     """The box draw-string for embedding in a widget's own atomic flush (so
     navigation redraws it alongside the list instead of leaving it flashed out)."""
-    rows = ui_utils.get_terminal_height()
+    rows = ui.get_terminal_height()
     if rows <= 1:
         return ""
-    cols = ui_utils.get_terminal_width()
-    return _footer_box_str(rows, ui_utils.footer_lines(cols))
+    cols = ui.get_terminal_width()
+    return _footer_box_str(rows, ui.footer_lines(cols))
 
 
 def invalidate_footer_box() -> None:
@@ -299,13 +299,13 @@ def _render_footer_bar() -> None:
     change lands) when nothing else redraws. Repaints when either the track
     identity or the styled rows changed, so an idle screen never flickers yet a
     new song is never missed."""
-    rows = ui_utils.get_terminal_height()
-    cols = ui_utils.get_terminal_width()
-    lines = ui_utils.footer_lines(cols)
+    rows = ui.get_terminal_height()
+    cols = ui.get_terminal_width()
+    lines = ui.footer_lines(cols)
     if len(lines) != _footer_prev_h[0]:
         # The box appeared or vanished: the menu must re-reserve rows for it.
-        ui_utils.mark_footer_layout_dirty()
-    if ui_utils.footer_signature() == _footer_prev_sig[0] and lines == _footer_prev_lines[0]:
+        ui.mark_footer_layout_dirty()
+    if ui.footer_signature() == _footer_prev_sig[0] and lines == _footer_prev_lines[0]:
         return
     seg = _footer_box_str(rows, lines)
     if seg:                       # unchanged rows produce nothing to write
@@ -326,7 +326,7 @@ def _wait_for_keypress(timeout: float = 0.05) -> bool:
         # Keep the background-activity notice live: while a task is running the
         # status bar is re-stamped each tick so it stays up for the whole job and
         # its cyan ● pulses; one extra redraw after the last task clears the bar.
-        active = ui_utils.has_background_tasks()
+        active = ui.has_background_tasks()
         if active or _status_prev_active[0]:
             with quietly():
                 _render_status_bar()
@@ -354,7 +354,7 @@ def _wait_for_keypress(timeout: float = 0.05) -> bool:
 
 def _cols() -> int:
     """Usable terminal width after subtracting the horizontal margins."""
-    return max(1, ui_utils.get_terminal_width() - 2 * ui_utils.MARGIN_H)
+    return max(1, ui.get_terminal_width() - 2 * ui.MARGIN_H)
 
 
 
@@ -409,10 +409,10 @@ def add_help_corner(line: str, row: int, cells: dict, i_key: bool = False) -> st
     is clickable (a click replays HINTS_CLICK). `i_key`: pressing `i` toggles
     here too; elsewhere `i` is typed or bound, and the click is the way."""
     text, width = help_corner_text()
-    col = max(1, ui_utils.get_terminal_width() - ui_utils.MARGIN_H - width + 1)
+    col = max(1, ui.get_terminal_width() - ui.MARGIN_H - width + 1)
     room = col - 2                                   # keep one blank column before it
-    body = line if ui_utils.visual_len(ui_utils.strip_ansi(line)) <= room else _clip_ansi(line, room)
-    pad = max(1, col - 1 - ui_utils.visual_len(ui_utils.strip_ansi(body)))
+    body = line if ui.visual_len(ui.strip_ansi(line)) <= room else _clip_ansi(line, room)
+    pad = max(1, col - 1 - ui.visual_len(ui.strip_ansi(body)))
     cells[(row, col + 1)] = HINTS_CLICK              # the `i` of "[i]"
     if i_key:
         cells['__i_key__'] = True                    # consume_chrome: `i` toggles here
@@ -426,9 +426,9 @@ def rounded_header(title: str, detail: str = "", right: str = "",
     toggle inline at the far right of the same row, then an optional dim
     `subtitle` row and a blank row. When space runs out the detail is trimmed
     first, then the facts dropped, then the title trimmed; the toggle stays."""
-    vl = ui_utils.visual_len
-    mh = ui_utils.MARGIN_H
-    inner = max(12, ui_utils.get_terminal_width() - 2 * mh - 4)
+    vl = ui.visual_len
+    mh = ui.MARGIN_H
+    inner = max(12, ui.get_terminal_width() - 2 * mh - 4)
     toggle, tw = help_corner_text()
 
     def _fit(text: str, n: int) -> str:
@@ -458,10 +458,10 @@ def place_help_toggle(out: list, first_row: int, cells: dict, i_key: bool = Fals
     carries it (rounded_header) gets its `i` registered where it is; otherwise
     it is added to the top line, `out[0]`. `out[k]` is drawn on row first_row + k."""
     for k, line in enumerate(out[:4]):
-        plain = ui_utils.strip_ansi(line)
+        plain = ui.strip_ansi(line)
         at = plain.find("[i] ")
         if at >= 0 and plain[at + 4:].startswith(("help", "hide help")):
-            cells[(first_row + k, ui_utils.visual_len(plain[:at]) + 2)] = HINTS_CLICK
+            cells[(first_row + k, ui.visual_len(plain[:at]) + 2)] = HINTS_CLICK
             if i_key:
                 cells['__i_key__'] = True
             return
@@ -487,7 +487,7 @@ def _hint(*pairs, extra="", always: bool = False) -> str:
         parsed_items.append((k, v, f"[{k}] {v}"))
 
     if extra:
-        plain_extra = ui_utils.strip_ansi(extra).strip()
+        plain_extra = ui.strip_ansi(extra).strip()
         if plain_extra:
             m = re.match(r'\[(.*?)\]\s*(.*)', plain_extra)
             if m:
@@ -658,7 +658,7 @@ def add_hint_click_cells_auto(cells: dict, line: str, base_row: int,
     """Like add_hint_click_cells but auto-detects ``[key]`` groups in the plain
     text (no pairs needed). Use only on lines known to be a hint bar; arbitrary
     bracketed text (e.g. a lyric ``[Chorus]``) would be picked up as a key."""
-    plain = ui_utils.display_text(line)
+    plain = ui.display_text(line)
     for m in re.finditer(r'\[([^\[\]]+)\]', plain):
         key_col0 = m.start() + 1
         for off, glen, synth in _hint_key_tokens(m.group(1)):
@@ -671,7 +671,7 @@ def add_hint_click_cells(cells: dict, line: str, base_row: int, pairs,
     """Populate ``cells`` (a ``{(row, col): synth_key}`` map) with the clickable
     bright-key glyphs found on one rendered hint ``line`` at absolute ``base_row``.
     ``pairs`` is the (key, label) sequence that produced the hint bar."""
-    plain = ui_utils.display_text(line)
+    plain = ui.display_text(line)
     for k, _v in pairs:
         if not k:
             continue
@@ -689,23 +689,23 @@ def _hint_pin_target() -> int:
     """The flowed-line count after which a widget's hint bar sits pinned at the
     bottom, directly above the now-playing box and status bar, so its keys keep the
     same screen position across redraws (repeated clicks don't chase the bar)."""
-    rows = ui_utils.get_terminal_height()
-    return rows - 1 - ui_utils.MARGIN_V - max(ui_utils.footer_height(), ui_utils.MARGIN_V)
+    rows = ui.get_terminal_height()
+    return rows - 1 - ui.MARGIN_V - max(ui.footer_height(), ui.MARGIN_V)
 
 
 # Now-playing box transport-icon columns, derived from the one place the glyph
-# layout is defined (ui_utils.FOOTER_GLYPH_COLS) rather than restated here: the
+# layout is defined (ui.FOOTER_GLYPH_COLS) rather than restated here: the
 # box is inset by MARGIN_H, then "│ " precedes the content, so a glyph at content
 # offset `o` lands on 1-based column MARGIN_H + 3 + o. Each glyph claims its own
 # column plus the space after it, so a click just to the right still lands.
 def _footer_glyph_cols() -> list[tuple[str, int, int]]:
     """(action, first_col, last_col) for each transport glyph in the box."""
-    base = ui_utils.MARGIN_H + 3
+    base = ui.MARGIN_H + 3
     actions = ('playpause', 'next')
     # A glyph claims its own cells plus the space after it, so a click just to
     # the right of a narrow glyph still lands on it.
     return [(a, base + start, base + start + width)
-            for a, (start, width) in zip(actions, ui_utils.FOOTER_GLYPH_COLS)]
+            for a, (start, width) in zip(actions, ui.FOOTER_GLYPH_COLS)]
 
 
 def footer_click_action(row: int, col: int) -> str | None:
@@ -713,9 +713,9 @@ def footer_click_action(row: int, col: int) -> str | None:
     / ``'next'`` on the transport glyphs, ``'open'`` anywhere else in the box, or
     ``None`` when the click misses it (or no box is shown)."""
     h = _footer_prev_h[0]
-    if h <= 0 or not ui_utils.footer_active():
+    if h <= 0 or not ui.footer_active():
         return None
-    rows = ui_utils.get_terminal_height()
+    rows = ui.get_terminal_height()
     top = rows - h
     if not (top <= row <= rows - 1):
         return None
@@ -729,10 +729,10 @@ def footer_click_action(row: int, col: int) -> str | None:
 def _render_status_bar():
     """Redraw the bottom status bar in place, saving/restoring the cursor so
     the text input caret doesn't move."""
-    rows = ui_utils.get_terminal_height()
+    rows = ui.get_terminal_height()
     if rows <= 0:
         return
-    status = ui_utils.get_status_line()
+    status = ui.get_status_line()
     # \0337 / \0338 (via save_cursor) keep the caret where the text input left
     # it rather than jumping to the status row; an unchanged bar writes nothing.
     screen_paint({rows: status}, save_cursor=True)
@@ -838,8 +838,8 @@ def _render_cell_segments(cell, style: str, is_current: bool, width: int, align:
             if remaining <= 0:
                 t = ""
             else:
-                t = ui_utils.truncate_text(t, remaining)
-            seg_w = ui_utils.visual_len(t)
+                t = ui.truncate_text(t, remaining)
+            seg_w = ui.visual_len(t)
             raw_len += seg_w
             remaining -= seg_w
             parts.append(_style_cell(t, s, is_current))
@@ -847,8 +847,8 @@ def _render_cell_segments(cell, style: str, is_current: bool, width: int, align:
         pad = " " * max(0, width - raw_len)
     else:
         raw_text, override = _cell_text(cell)
-        raw_text = ui_utils.truncate_text(raw_text, width)
-        raw_len = ui_utils.visual_len(raw_text)
+        raw_text = ui.truncate_text(raw_text, width)
+        raw_len = ui.visual_len(raw_text)
         text = _style_cell(raw_text, override or style, is_current)
         pad = " " * max(0, width - raw_len)
     return (pad + text) if align == 'right' else (text + pad)
@@ -894,13 +894,13 @@ def _table_widths(rows_cells: list, columns: list, eff: int,
     content = [0] * ncol
     for cells in rows_cells:
         for i in range(min(ncol, len(cells))):
-            content[i] = max(content[i], ui_utils.visual_len(_cell_text(cells[i])[0]))
+            content[i] = max(content[i], ui.visual_len(_cell_text(cells[i])[0]))
 
     # What each column actually has to show in the window on screen.
     shown = [0] * ncol
     for cells in (rows_cells if visible_cells is None else visible_cells):
         for i in range(min(ncol, len(cells))):
-            shown[i] = max(shown[i], ui_utils.visual_len(_cell_text(cells[i])[0]))
+            shown[i] = max(shown[i], ui.visual_len(_cell_text(cells[i])[0]))
 
     def _cap(col) -> int | None:
         """The hard upper bound a column may reach (max_frac / max_width), or None."""
@@ -1037,7 +1037,7 @@ def _render_table_row(cells: list, columns: list, is_current: bool,
                     cells[i] if i < len(cells) else "", 'dynamic-dim', False, widths[i], col.align,
                     force_dim=True)
         if right:
-            gap = max(2, (eff - right_margin) - ui_utils.visual_len(left) - ui_utils.visual_len(right))
+            gap = max(2, (eff - right_margin) - ui.visual_len(left) - ui.visual_len(right))
             return left + " " * gap + right + " " * right_margin
         return left
 
@@ -1061,7 +1061,7 @@ def _render_table_row(cells: list, columns: list, is_current: bool,
                 force_dim=dim)
 
     if right:
-        gap = max(2, (eff - right_margin) - ui_utils.visual_len(left) - ui_utils.visual_len(right))
+        gap = max(2, (eff - right_margin) - ui.visual_len(left) - ui.visual_len(right))
         return left + " " * gap + right + " " * right_margin
     return left
 
@@ -1124,7 +1124,7 @@ def separator(title: str = "") -> Choice:
 def _clip_ansi(s: str, width: int) -> str:
     """Truncate a string to `width` visible columns, preserving ANSI escape
     sequences (they don't count toward width). Guarantees the line never wraps."""
-    return ui_utils.clip_ansi(s, width)
+    return ui.clip_ansi(s, width)
 
 
 
@@ -1304,16 +1304,16 @@ def _visible_rows() -> int:
     status bar (1) and the top+bottom vertical margins. Callers subtract their
     OWN chrome (header, message, indicators, hints); do not double-count it
     here, or lists show a premature "N more"."""
-    _, rows = ui_utils.get_terminal_size()
+    _, rows = ui.get_terminal_size()
     # Reserve the status-bar row, plus the now-playing box's rows whenever
     # background audio is active, so lists never collide with it.
-    reserve = 1 + ui_utils.footer_height()
-    return max(4, rows - reserve - 2 * ui_utils.MARGIN_V)
+    reserve = 1 + ui.footer_height()
+    return max(4, rows - reserve - 2 * ui.MARGIN_V)
 
 
 def _rows() -> int:
     """Terminal height in rows."""
-    return ui_utils.get_terminal_height()
+    return ui.get_terminal_height()
 
 
 def _hint_lines(*pairs, extra="") -> list[str]:
@@ -1362,8 +1362,8 @@ class _Widget:
         status bar) are left exactly as they are instead of being wiped and
         restamped on every keystroke.
         """
-        mv   = ui_utils.MARGIN_V
-        rows = ui_utils.get_terminal_height()
+        mv   = ui.MARGIN_V
+        rows = ui.get_terminal_height()
 
         # Wrap content with vertical margins: mv blank rows on top, mv reserved
         # rows before the status bar at the bottom. The box's band is excluded so
@@ -1394,7 +1394,7 @@ class _Widget:
 
         # The status bar and the box join the same frame, so everything lands in
         # one flush, but each row still only costs anything if it changed.
-        frame[rows] = ui_utils.get_status_line()
+        frame[rows] = ui.get_status_line()
         frame = _takeover_rows(frame)
         parts = [C.HIDE]
         for row in sorted(frame):
@@ -1409,7 +1409,7 @@ class _Widget:
         """Clear the screen and reset anchor state, cursor still hidden.
 
         The cursor is only ever shown for a text caret, or by
-        `ui_utils.exit_alt_screen()` when the app hands the terminal back.
+        `ui.exit_alt_screen()` when the app hands the terminal back.
         """
         sys.stdout.write("\033[H\033[3J\033[J" + C.HIDE)
         sys.stdout.flush()
@@ -1458,9 +1458,9 @@ def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=No
     last_render = 0.0
     try:
         while True:
-            resized = ui_utils.consume_resize()
+            resized = ui.consume_resize()
             if resized:
-                ui_utils.clear_screen()
+                ui.clear_screen()
                 w.anchor_reset()
             now = time.monotonic()
             if resized or now - last_render >= interval:
@@ -1473,7 +1473,7 @@ def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=No
                         break
                     if on_key is not None:
                         on_key(key)
-                        ui_utils.clear_screen()
+                        ui.clear_screen()
                         w.anchor_reset()
             else:
                 time.sleep(interval)
@@ -1490,7 +1490,7 @@ def _demo() -> None:
     """Self-check for the pure (non-interactive) logic in this module, the
     parts that run without a terminal. Doesn't touch raw mode, key reading,
     or screen painting (those need a real tty).
-    Run directly: `python3 -m backbone.prompt_core`.
+    Run directly: `python3 -m backbone.prompt.core`.
     """
     assert _norm(["a", "b"])[0].title == "a"
     assert _norm([{"name": "x", "value": 1}])[0].value == 1
@@ -1509,7 +1509,7 @@ def _demo() -> None:
     assert [t[2] for t in tokens] == ["UP", "DOWN"]
     assert _hint_key_tokens("^N") == [(0, 2, "\x0e")]
 
-    print("backbone.prompt_core self-check OK")
+    print("backbone.prompt.core self-check OK")
 
 
 if __name__ == "__main__":

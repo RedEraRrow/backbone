@@ -2,11 +2,11 @@
 player and transport keys, mouse reporting, and the per-edit raw-text toggle."""
 from __future__ import annotations
 import sys
-from backbone.prompt_core import (
+from backbone.prompt.core import (
     _IS_WINDOWS, _hint, add_hint_click_cells, footer_click_action, _hint_pin_target,
     screen_invalidate, HINTS_CLICK, toggle_hints, place_help_toggle,
 )
-from backbone import ui as ui_utils
+from backbone import ui
 
 
 # The one key pair that moves a row up or down, wherever a list's order can be
@@ -93,7 +93,7 @@ def chrome_hint_pairs(pairs) -> list:
     so they are still listed.
     """
     items = list(pairs.items()) if isinstance(pairs, dict) else [tuple(p) for p in pairs]
-    if ui_utils.footer_active() or ui_utils.footer_unboxed():
+    if ui.footer_active() or ui.footer_unboxed():
         if _transport_handler is not None:
             items += [("^p", "play/pause"), ("^n/^b", "next/prev")]
         if _player_opener is not None:
@@ -127,7 +127,7 @@ def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
         filler = _hint_pin_target() - len(out) - len(hint_lines)
         if filler > 0:
             out.extend([""] * filler)
-    out.extend(f"{' ' * ui_utils.MARGIN_H}{h}" for h in hint_lines)
+    out.extend(f"{' ' * ui.MARGIN_H}{h}" for h in hint_lines)
 
     cells.clear()
     if hint_lines:
@@ -135,8 +135,8 @@ def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
         for k in range(len(hint_lines)):
             # `_Widget.render` lays line j at terminal row anchor(1) + MARGIN_V + j.
             add_hint_click_cells(cells, out[start + k],
-                                 1 + ui_utils.MARGIN_V + (start + k), items)
-    place_help_toggle(out, 1 + ui_utils.MARGIN_V, cells, i_key)
+                                 1 + ui.MARGIN_V + (start + k), items)
+    place_help_toggle(out, 1 + ui.MARGIN_V, cells, i_key)
     return out
 
 
@@ -237,4 +237,4 @@ def _plain(s: str) -> str:
     whether column `col` holds a character or blank padding. Shared by
     `select` and `live_select`, so the two widgets' click behaviour can't drift.
     """
-    return "".join(ch * ui_utils.char_cols(ch) for ch in ui_utils.display_text(s))
+    return "".join(ch * ui.char_cols(ch) for ch in ui.display_text(s))

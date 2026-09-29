@@ -1,17 +1,17 @@
 """Audio value editors: the volume adjustment (RVA2) and the equaliser."""
 from __future__ import annotations
 import sys
-from backbone.prompt_core import (
+from backbone.prompt.core import (
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, _read_key, _cols,
     _Widget, _hint_pin_target, screen_takeover_next,
 )
-from backbone import ui as ui_utils
+from backbone import ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt.chrome import (
     append_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse,
 )
 from backbone.prompt.text import text
-from backbone.prompt_core import C
+from backbone.prompt.core import C
 
 
 # ─── Graphic equaliser widget (EQU2) ────────────────────────────────────────
@@ -73,7 +73,7 @@ def _eq_render_lines(bands: list, cursor: int, message: str, status: str,
     response curve through the band tops, dB axis and frequency labels."""
     out = [
         f"  {C.DIM}{message}{C.RESET}",
-        f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}",
+        f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}",
     ]
     n = len(bands)
     plot_w = max(10, cols - 5)              # 4 cols for the dB label + 1 gap
@@ -270,8 +270,8 @@ def rva2_edit(message: str = "Volume adjustment:", gain: float = 0.0) -> float |
         _render()
 
         while True:
-            if ui_utils.consume_resize():
-                ui_utils.clear_screen()
+            if ui.consume_resize():
+                ui.clear_screen()
                 w.anchor_reset()
                 _render()
                 continue
@@ -376,8 +376,8 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
         _render()
 
         while True:
-            if ui_utils.consume_resize():
-                ui_utils.clear_screen()
+            if ui.consume_resize():
+                ui.clear_screen()
                 w.anchor_reset()
                 _render()
                 continue

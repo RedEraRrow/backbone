@@ -3,12 +3,12 @@ from __future__ import annotations
 import re
 import sys
 import os
-from backbone.prompt_core import (
+from backbone.prompt.core import (
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, _hint, block_cursor,
     block_cursor_width, _read_key, _visible_rows, _cols, _Widget, add_hint_click_cells,
     footer_click_action, _hint_pin_target, screen_takeover_next, add_help_corner,
 )
-from backbone import ui as ui_utils
+from backbone import ui
 from backbone import datetime_parse as dtp
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
@@ -17,8 +17,8 @@ from backbone.prompt.chrome import (
 )
 from backbone.prompt.lists import confirm
 from backbone.prompt.text import path, system_editor_edit
-from backbone.prompt_core import C
-from backbone.prompt_core import edit_line
+from backbone.prompt.core import C
+from backbone.prompt.core import edit_line
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ def _render_list_edit_cell(text: str, width: int, is_editing: bool, is_active_co
             # waiting to be filled, and it keeps the cell a fixed width so the
             # columns after it don't slide left on an empty row.
             return _render_timestamp_cell(_ts_buffer(text), -1, width, False, base)
-        return ui_utils.truncate_text(text, width)
+        return ui.truncate_text(text, width)
 
     if is_timestamp:
         return _render_timestamp_cell(edit_buf, edit_pos, width, True, base)
@@ -223,7 +223,7 @@ def _build_list_edit_lines(
     and report the resulting viewport/visible-row/header-row counts."""
     num_cols = len(headers)
     cols = _cols()
-    ui_utils.footer_lines(ui_utils.get_terminal_width())   # refresh box height (see select._lines)
+    ui.footer_lines(ui.get_terminal_width())   # refresh box height (see select._lines)
     c = cols - 4
     inner = c
     out = []
@@ -238,7 +238,7 @@ def _build_list_edit_lines(
     edit_hints = {"tab/⇧tab": "column", "esc": "back", "↵": "save"}
 
     out.append(f"  {C.DIM}{message}{C.RESET}")
-    out.append(f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}")
+    out.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
     avail_w = max(10, inner - 4 - (2 * (num_cols - 1)))
     col_widths = _layout_columns(num_cols, avail_w, col_ratios, col_mins)
@@ -315,21 +315,21 @@ def _build_list_edit_lines(
                         if not is_barrel_col:
                             return " " * w
                         if prev_text:
-                            return f"{C.ACCENT}⌃{C.RESET} {C.DIM}{ui_utils.truncate_text(prev_text, w - 2)}{C.RESET}"
+                            return f"{C.ACCENT}⌃{C.RESET} {C.DIM}{ui.truncate_text(prev_text, w - 2)}{C.RESET}"
                         return " " * w
 
                     def _barrel_mid(w: int, is_barrel_col: bool, val: str) -> str:
                         """Current barrel-mode value (or the plain cell) for this column."""
                         if not is_barrel_col:
                             return f"{val:<{w}}"
-                        return f"{C.PRIMARY}{C.BOLD}{ui_utils.truncate_text(cur_text, w)}{C.RESET}"
+                        return f"{C.PRIMARY}{C.BOLD}{ui.truncate_text(cur_text, w)}{C.RESET}"
 
                     def _barrel_below(w: int, is_barrel_col: bool) -> str:
                         """Preview line for the barrel-mode value one step after the current one."""
                         if not is_barrel_col:
                             return " " * w
                         if next_text:
-                            return f"{C.ACCENT}⌄{C.RESET} {C.DIM}{ui_utils.truncate_text(next_text, w - 2)}{C.RESET}"
+                            return f"{C.ACCENT}⌄{C.RESET} {C.DIM}{ui.truncate_text(next_text, w - 2)}{C.RESET}"
                         return " " * w
 
                     mid_parts, below_parts = [], []
@@ -381,12 +381,12 @@ def _build_list_edit_lines(
 
                 if row_is_editing and barrel_mode:
                     w = inner - 4
-                    mid   = f"{C.PRIMARY}{C.BOLD}{ui_utils.truncate_text(cur_text, w)}{C.RESET}"
+                    mid   = f"{C.PRIMARY}{C.BOLD}{ui.truncate_text(cur_text, w)}{C.RESET}"
                     if show_above and prev_text:
-                        out.append(f"    {C.ACCENT}⌃{C.RESET} {C.DIM}{ui_utils.truncate_text(prev_text, w - 2)}{C.RESET}")
+                        out.append(f"    {C.ACCENT}⌃{C.RESET} {C.DIM}{ui.truncate_text(prev_text, w - 2)}{C.RESET}")
                     out.append(f"  ✎ {mid}")
                     if next_text:
-                        out.append(f"    {C.ACCENT}⌄{C.RESET} {C.DIM}{ui_utils.truncate_text(next_text, w - 2)}{C.RESET}")
+                        out.append(f"    {C.ACCENT}⌄{C.RESET} {C.DIM}{ui.truncate_text(next_text, w - 2)}{C.RESET}")
                     continue
 
                 cell_str = _render_list_edit_cell(
@@ -402,8 +402,8 @@ def _build_list_edit_lines(
     _filler = _hint_pin_target() - len(out) - 1 - len(hint_lines)
     if _filler > 0:
         out.extend([""] * _filler)
-    out.append(f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}")
-    out.extend(f"{' ' * ui_utils.MARGIN_H}{h}" for h in hint_lines)
+    out.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
+    out.extend(f"{' ' * ui.MARGIN_H}{h}" for h in hint_lines)
 
     return out, viewport, vis, _LEDIT_HEADER_ROWS, active_hints, len(hint_lines)
 
@@ -547,9 +547,9 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
             _start = len(lines) - n_hint
             for _k in range(n_hint):
                 add_hint_click_cells(_hint_cells, lines[_start + _k],
-                                     1 + ui_utils.MARGIN_V + (_start + _k), _hp)
+                                     1 + ui.MARGIN_V + (_start + _k), _hp)
         if lines:               # `i` imports text here, so the corner is click-only
-            lines[0] = add_help_corner(lines[0], 1 + ui_utils.MARGIN_V, _hint_cells)
+            lines[0] = add_help_corner(lines[0], 1 + ui.MARGIN_V, _hint_cells)
         w.render(lines)
 
     def _commit_edit_buffer():
@@ -572,8 +572,8 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
         _render()
 
         while True:
-            if ui_utils.consume_resize():
-                ui_utils.clear_screen()
+            if ui.consume_resize():
+                ui.clear_screen()
                 w.anchor_reset()
                 _le_last_click = None
                 _render()
@@ -814,7 +814,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                     _btn, _mrow = int(_parts[1]), int(_parts[2])
                     if _btn == 0 and items:
                         # render() prepends MARGIN_V blank rows before lines[0]
-                        _line_idx   = _mrow - 1 - ui_utils.MARGIN_V
+                        _line_idx   = _mrow - 1 - ui.MARGIN_V
                         _item_offset = _line_idx - _le_header_rows
                         if 0 <= _item_offset < _le_vis:
                             _clicked_idx = viewport + _item_offset
@@ -922,7 +922,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                         # Clear to a fresh screen first: path() renders inline from
                         # the cursor, so without this it draws over the list and spills.
                         _restore_term_attrs(fd, old)
-                        ui_utils.clear_screen()
+                        ui.clear_screen()
                         file_path = path("Import from file:")
                         _set_raw(fd)
                         text_input = None
@@ -931,7 +931,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                                 with open(os.path.expanduser(file_path), encoding='utf-8') as _fp:
                                     text_input = _fp.read()
                             except OSError:
-                                ui_utils.show_status(f"Couldn't read {file_path}")
+                                ui.show_status(f"Couldn't read {file_path}")
                                 text_input = None
                     enable_mouse()   # re-arm mouse
                     screen_takeover_next()   # paint over the previous screen, no flash
@@ -945,7 +945,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                     raise QuitToTerminal()   # q quits the app; never a way out of a widget
 
                 elif key == 'ESC':
-                    ui_utils.clear_screen()
+                    ui.clear_screen()
                     # "Discard changes?" → yes = drop edits (original), no = keep edits.
                     result = initial_items if confirm("Discard changes?", default=False) else items
                     break

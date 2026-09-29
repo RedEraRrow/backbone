@@ -4,19 +4,19 @@ from __future__ import annotations
 import re
 import sys
 from typing import Any, Callable, Literal, overload
-from backbone.prompt_core import (
+from backbone.prompt.core import (
     _COLUMNS_MAX_WIDTH, _EDGE_MARGIN, _get_term_attrs, _set_raw, _restore_term_attrs,
     _wait_for_keypress, _table_widths, _render_table_row, _clip_ansi, _norm, block_cursor,
     _read_key, _visible_rows, _cols, _Widget, _hint_pin_target, screen_takeover_next,
 )
-from backbone import ui as ui_utils
+from backbone import ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import (
     append_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, MOVE_DOWN_KEY, MOVE_HINT, MOVE_UP_KEY, _plain,
 )
-from backbone.prompt_core import C
-from backbone.prompt_core import edit_line
+from backbone.prompt.core import C
+from backbone.prompt.core import edit_line
 
 
 class ListPlace:
@@ -287,16 +287,16 @@ def select(message: str, choices: list, *,
         # (vis) and hint pinning match the box that render() will actually draw;
         # otherwise a just-appeared box paints over the pinned hints until the
         # next redraw (hints missing until you click/navigate).
-        ui_utils.footer_lines(ui_utils.get_terminal_width())
+        ui.footer_lines(ui.get_terminal_width())
         h_lines = _header_lines()
         _last_hlen[0] = len(h_lines)
         _row_plain.clear()
 
         max_header_w = 0
         for hl in h_lines:
-            plain_hl = ui_utils.strip_ansi(hl)
+            plain_hl = ui.strip_ansi(hl)
             plain_hl = re.sub(r'[╭─│╰╮╯┌┐└┘├┤┬┴┼═║╔╗╚╝]', '', plain_hl).strip()
-            max_header_w = max(max_header_w, ui_utils.visual_len(plain_hl))
+            max_header_w = max(max_header_w, ui.visual_len(plain_hl))
 
         layout_constraint = " " * max_header_w if (0 < max_header_w < cols - 20) else ""
 
@@ -394,7 +394,7 @@ def select(message: str, choices: list, *,
         append_chrome(out, hints_now, _hint_cells, extra=layout_constraint, i_key=_i_free())
         # Hard guarantee: no rendered line ever exceeds the terminal width, so
         # the list can never wrap no matter how narrow the window is.
-        _w = ui_utils.get_terminal_width()          # once per frame, not per line
+        _w = ui.get_terminal_width()          # once per frame, not per line
         return [_clip_ansi(line, _w) for line in out]
 
     result = None
@@ -406,8 +406,8 @@ def select(message: str, choices: list, *,
         w.render(_lines())
 
         while True:
-            if ui_utils.consume_resize():
-                ui_utils.clear_screen()
+            if ui.consume_resize():
+                ui.clear_screen()
                 w.anchor_reset()
                 w.render(_lines())
                 continue
@@ -543,8 +543,8 @@ def select(message: str, choices: list, *,
                 # Click on the status-bar row's pulsing ● beacon → open the
                 # activity centre (only while something is actually running).
                 if (chrome._activity_opener is not None
-                        and r >= ui_utils.get_terminal_height()
-                        and ui_utils.has_background_tasks()):
+                        and r >= ui.get_terminal_height()
+                        and ui.has_background_tasks()):
                     chrome._activity_opener()
                     enable_mouse()
                     sys.stdout.flush()
@@ -558,7 +558,7 @@ def select(message: str, choices: list, *,
                 # lines[] layout: H header lines, message, viewport-above
                 # indicator, then items. So item[viewport] is at:
                 #   terminal row = w.row + MARGIN_V + H + 2
-                i = r - w.row - ui_utils.MARGIN_V - _last_hlen[0] - 2
+                i = r - w.row - ui.MARGIN_V - _last_hlen[0] - 2
                 idx = viewport + i
                 if not (0 <= idx < len(items)):
                     continue
@@ -753,9 +753,9 @@ def live_select(message: str, provider: Callable[[str], list], *,
 
     def _lines() -> list:
         nonlocal viewport
-        width = ui_utils.get_terminal_width()
+        width = ui.get_terminal_width()
         cols  = _cols()
-        ui_utils.footer_lines(width)   # refresh box height (see select._lines)
+        ui.footer_lines(width)   # refresh box height (see select._lines)
         out = _header_lines()
 
         qtext = "".join(query)
@@ -774,7 +774,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
             _field = block_cursor("", 0)
         out.append(f"  {_label}{_field}")
         count = ("" if not qtext else
-                 ui_utils.plural(len(items) if count_of is None else count_of(), "result"))
+                 ui.plural(len(items) if count_of is None else count_of(), "result"))
         out.append(f"  {C.DIM}{count}{C.RESET}" if count else "")
 
         hint_lines = chrome_hint_lines(hints)
@@ -839,8 +839,8 @@ def live_select(message: str, provider: Callable[[str], list], *,
         w.render(_lines())
 
         while True:
-            if ui_utils.consume_resize():
-                ui_utils.clear_screen()
+            if ui.consume_resize():
+                ui.clear_screen()
                 w.anchor_reset()
                 w.render(_lines())
                 continue
@@ -893,7 +893,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
                 parts = key.split(':')
                 r = int(parts[2]) if len(parts) > 2 else 0
                 col = int(parts[3]) if len(parts) > 3 else 1
-                i = r - w.row - ui_utils.MARGIN_V - _fixed_rows[0]
+                i = r - w.row - ui.MARGIN_V - _fixed_rows[0]
                 idx = viewport + i
                 if 0 <= idx < len(items):
                     clickable = not items[idx].disabled
@@ -973,7 +973,7 @@ def confirm(message: str, default: bool = False) -> bool:
                  ("esc", "back")]
         head = [
             f"  {C.DIM}{message}{C.RESET}",
-            f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}",
+            f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}",
         ]
         lines = list(head)
         append_chrome(lines, pairs, _hint_cells, i_key=True)

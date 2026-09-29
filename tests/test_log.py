@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backbone import log as logmod, prompt_core as pc, ui as ui_utils
+from backbone import log as logmod, ui
+from backbone.prompt import core as pc
 
 
 class DiagnosticsLogTest(unittest.TestCase):
@@ -22,10 +23,10 @@ class DiagnosticsLogTest(unittest.TestCase):
 
     def _resize(self, rows):
         pc._screen.clear(); pc._screen_size[0] = None
-        with patch.object(ui_utils, 'get_terminal_size', lambda *a: (80, 24)):
+        with patch.object(ui, 'get_terminal_size', lambda *a: (80, 24)):
             for r, text in rows.items():
                 pc.screen_row_paint(r, text)
-        with patch.object(ui_utils, 'get_terminal_size', lambda *a: (60, 24)):
+        with patch.object(ui, 'get_terminal_size', lambda *a: (60, 24)):
             pc.screen_row_paint(1, "new frame")
 
     def test_off_writes_nothing(self):

@@ -4,7 +4,8 @@ it), and the page arrows are clickable keys."""
 import unittest
 from unittest.mock import patch
 
-from backbone import prompt, prompt_core
+from backbone import prompt
+from backbone.prompt import core as pc
 from backbone.prompt import chrome
 
 
@@ -12,7 +13,7 @@ class TransportHintClickTest(unittest.TestCase):
     def test_clicked_transport_hints_run_the_transport(self):
         calls = []
         cells: dict = {}
-        prompt_core.add_hint_click_cells(cells, "[^p] play/pause  [^n/^b] next/prev", 5,
+        pc.add_hint_click_cells(cells, "[^p] play/pause  [^n/^b] next/prev", 5,
                                          [("^p", "play/pause"), ("^n/^b", "next/prev")])
         with patch.object(chrome, '_transport_handler', calls.append), \
              patch.object(chrome, 'footer_click_action', lambda r, c: None):
@@ -23,7 +24,7 @@ class TransportHintClickTest(unittest.TestCase):
         self.assertEqual(calls, ['playpause', 'next', 'prev'])
 
     def test_page_arrows_are_clickable(self):
-        self.assertEqual([t[2] for t in prompt_core._hint_key_tokens("⇞⇟")], ['PGUP', 'PGDN'])
+        self.assertEqual([t[2] for t in pc._hint_key_tokens("⇞⇟")], ['PGUP', 'PGDN'])
 
 
 if __name__ == "__main__":

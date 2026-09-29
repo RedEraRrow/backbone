@@ -47,7 +47,7 @@ values: `calendar_select`, `datetime_edit`, `time_edit`,
 `system_editor_edit`. All resize-aware, all mouse-aware, all rendered through
 the same painter.
 
-**`prompt_core`** - the primitives underneath: the screen-diff painter, key
+**`prompt.core`** - the primitives underneath: the screen-diff painter, key
 reading, the `Choice` and `Column` types, the footer hint bar (`hint`) and its
 click mapping, and `run_dashboard`.
 
@@ -76,7 +76,7 @@ the exit codes that go with them.
 timestamped line, printed and appended to its log), `disk_free`,
 `count_entries`.
 
-**`procs`** - a tool's own background processes: `spawn_script` starts one
+**`procs`** - a tool's own background processes: `spawn_module` starts one (`python -m`)
 detached, `find_processes` / `stop_processes` find or SIGTERM them by name
 however they were started (directly, through `python3`, or through a launcher
 command given as `launcher=`), `ps_listing` for the raw process table.
@@ -89,7 +89,7 @@ machine.
 and SRT timestamps; arabic, roman or written-out numbers; the keyboard layout
 family (for typo scoring); raw key reads and escape decoding.
 
-**`tz_widget`** - a full-screen world-map timezone picker.
+**`prompt.timezone`** - a full-screen world-map timezone picker.
 
 ## Live views
 
@@ -97,7 +97,7 @@ family (for typo scoring); raw key reads and escape decoding.
 through the same `_Widget` machinery every prompt widget uses, rather than each
 tool hand-rolling a redraw loop:
 
-    from backbone.prompt_core import run_dashboard
+    from backbone.prompt.core import run_dashboard
 
     def render() -> list:
         return ["  line one", "  line two"]
@@ -141,7 +141,7 @@ for a host app's playback keys and player view (`set_transport_handler`,
 Two modules check their own pure logic, no terminal needed:
 
     python3 -m backbone.ui
-    python3 -m backbone.prompt_core
+    python3 -m backbone.prompt.core
 
 Both print an OK line. They cover the parts that run without a terminal:
 sizing, measuring, truncation, table widths, hint parsing. Raw mode,

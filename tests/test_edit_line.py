@@ -1,7 +1,7 @@
 """The one line editor every text field uses."""
 import unittest
 
-from backbone.prompt_core import edit_line
+from backbone.prompt.core import edit_line
 
 
 class EditLineTest(unittest.TestCase):

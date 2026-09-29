@@ -4,11 +4,11 @@ Two modes, one set of calls. A command says *what* it produced (a table, a
 record, an event, a failure) and never how to render it, so adding `--json`
 needed no second code path and a new command gets both modes for free.
 
-Human tables are laid out by `prompt_core._table_widths` / `_render_table_row`,
+Human tables are laid out by `prompt.core._table_widths` / `_render_table_row`,
 the same engine every list in the app uses, so a CLI table and a browse list
 agree about widths, truncation and which column drops first on a narrow
-terminal. Colour comes from `ui_utils.Colors`, switched off process-wide by
-`ui_utils.set_colour` rather than checked here.
+terminal. Colour comes from `ui.Colors`, switched off process-wide by
+`ui.set_colour` rather than checked here.
 
 **Piping.** A list command prints its table when stdout is a terminal and one
 path per line when it is not, which is what `ls` does and what makes
@@ -23,8 +23,8 @@ from __future__ import annotations
 import json
 import sys
 
-from backbone import prompt_core as pc
-from backbone import ui as ui_utils
+from backbone.prompt import core as pc
+from backbone import ui
 
 # Exit codes. 0/1 are the shell's own conventions; the rest name the failures a
 # script would want to branch on without parsing a message.
@@ -47,14 +47,14 @@ def configure(*, json_mode: bool = False, quiet: bool = False,
               colour: bool | None = None) -> None:
     """Fix the output mode for the run. Called once, by `cli.main`.
 
-    `colour` defaults to `ui_utils.colour_enabled()` (a terminal with NO_COLOR
+    `colour` defaults to `ui.colour_enabled()` (a terminal with NO_COLOR
     unset), and JSON never carries colour whatever the terminal is.
     """
     global _json, _quiet
     _json, _quiet = json_mode, quiet
     if colour is None:
-        colour = ui_utils.colour_enabled() and not json_mode
-    ui_utils.set_colour(bool(colour))
+        colour = ui.colour_enabled() and not json_mode
+    ui.set_colour(bool(colour))
 
 
 def json_mode() -> bool:
@@ -95,7 +95,7 @@ def record(kind: str, body: dict, *, human: str | None = None) -> None:
         _write(human)
         return
     width = max((len(str(k)) for k in body), default=0)
-    dim, reset = ui_utils.Colors.DIM, ui_utils.Colors.RESET
+    dim, reset = ui.Colors.DIM, ui.Colors.RESET
     for key, value in body.items():
         _write(f"  {dim}{str(key).ljust(width)}{reset}  {human_value(value)}")
 
@@ -115,7 +115,7 @@ def table(kind: str, rows: list, columns: list, *,
           cells=None, pipe_key: str = 'path') -> None:
     """A list: JSON array, an aligned table on a terminal, or bare `pipe_key`s.
 
-    `rows` are dicts. `columns` are `prompt_core.Column` specs, and `cells` maps
+    `rows` are dicts. `columns` are `prompt.core.Column` specs, and `cells` maps
     one row to the list of strings those columns render, keeping the JSON
     (whole objects) and the table (chosen fields) from having to agree on shape.
     """
@@ -126,7 +126,7 @@ def table(kind: str, rows: list, columns: list, *,
         return
     if not rows:
         if is_tty():
-            _write(f"  {ui_utils.Colors.DIM}(nothing to show){ui_utils.Colors.RESET}")
+            _write(f"  {ui.Colors.DIM}(nothing to show){ui.Colors.RESET}")
         return
     if not is_tty():
         # Piped: one path per line, so the next command can read it on stdin.
@@ -135,7 +135,7 @@ def table(kind: str, rows: list, columns: list, *,
         return
     cells = cells or (lambda r: [str(v) for v in r.values()])
     body = [cells(r) for r in rows]
-    eff = ui_utils.get_terminal_width() - 2 * ui_utils.MARGIN_H
+    eff = ui.get_terminal_width() - 2 * ui.MARGIN_H
     widths = pc._table_widths(body, columns, eff, 0, 0)
     for cell_row in body:
         _write(pc._render_table_row(cell_row, columns, False, widths, eff, 0))
@@ -179,7 +179,7 @@ def fail(code: int, message: str, **context) -> int:
             'code': code_name(code), 'message': message, 'context': context}})
         sys.stderr.write(json.dumps(body) + "\n")
     else:
-        accent, reset = ui_utils.Colors.ACCENT, ui_utils.Colors.RESET
+        accent, reset = ui.Colors.ACCENT, ui.Colors.RESET
         detail = ''.join(f"\n  {k}: {v}" for k, v in context.items())
         sys.stderr.write(f"{accent}✘{reset} {message}{detail}\n")
     sys.stderr.flush()

@@ -19,8 +19,8 @@ def ps_listing() -> str:
 def find_processes(*names: str, launcher: str | None = None) -> list:
     """(pid, command) for every running process whose program is one of
     `names`, however it was started: `name`, `name.py`, `python3 name.py`, or
-    through a `launcher` command (`launcher name`). The calling process is
-    never included."""
+    through a `launcher` command or package (`launcher name`,
+    `python3 -m launcher.name`). The calling process is never included."""
     try:
         out = subprocess.run(["ps", "-Awwo", "pid=,command="], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.TimeoutExpired):
@@ -34,6 +34,8 @@ def find_processes(*names: str, launcher: str | None = None) -> list:
         if not args:
             continue
         prog = Path(args[0]).name.removesuffix(".py")
+        if launcher and prog.startswith(launcher + "."):
+            prog = prog[len(launcher) + 1:]
         if prog in names or (launcher and prog == launcher and len(args) > 1 and args[1] in names):
             found.append((int(pid), command))
     return found
@@ -51,8 +53,8 @@ def stop_processes(*names: str, launcher: str | None = None) -> int:
     return stopped
 
 
-def spawn_script(script: Path, out_path: Path) -> None:
-    """Start the Python `script` in the background with this interpreter, its
+def spawn_module(module: str, out_path: Path) -> None:
+    """Run `python -m module` in the background with this interpreter, its
     output (unbuffered, so it can be read while it runs) appended to `out_path`."""
     with open(out_path, "ab") as out:     # the child keeps its own copy of the handle
-        subprocess.Popen([sys.executable, "-u", str(script)], stdout=out, stderr=subprocess.STDOUT)
+        subprocess.Popen([sys.executable, "-u", "-m", module], stdout=out, stderr=subprocess.STDOUT)

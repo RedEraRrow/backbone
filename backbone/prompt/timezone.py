@@ -1,18 +1,16 @@
-"""Timezone data, world map rendering, and timezone_select widget."""
+"""Timezone data, world map rendering, and the timezone_select widget."""
 from __future__ import annotations
 import re
 import sys
 
-# Allow running this file directly (`python3 src/utils/tz_widget.py`) for
-# standalone testing/fun: put the repo root on sys.path before the package
-# imports below, which otherwise require running as `python3 -m src.utils...`.
+# Runs on its own too: `python3 -m backbone.prompt.timezone`.
 from backbone import prompt as _prompt   # shared widget chrome (hints/transport)
-from backbone.prompt_core import (
+from backbone.prompt.core import (
     _Widget, _read_key, _wait_for_keypress,
     _set_raw, _restore_term_attrs, _get_term_attrs,
     _visible_rows, _cols, C,
 )
-from backbone import ui as ui_utils
+from backbone import ui
 from backbone.nav import QuitToTerminal
 
 _TIMEZONES = [
@@ -1424,11 +1422,11 @@ def timezone_select(initial_offset: str = "") -> str | None:
     try:
         _set_raw(fd)
         _prompt.enable_mouse()
-        ui_utils.clear_screen()     # through ui_utils, so the painter forgets the old rows
+        ui.clear_screen()     # through ui, so the painter forgets the old rows
         _render()
 
         while True:
-            if ui_utils.consume_resize():
+            if ui.consume_resize():
                 sys.stdout.write("\033[H\033[3J\033[J")
                 sys.stdout.flush()
                 w.anchor_reset()
@@ -1522,7 +1520,7 @@ def timezone_select(initial_offset: str = "") -> str | None:
 
 
 if __name__ == '__main__':
-    # Standalone demo: `python3 -m backbone.tz_widget [+05:30]`
+    # Standalone demo: `python3 -m backbone.prompt.timezone [+05:30]`
     _initial = sys.argv[1] if len(sys.argv) > 1 else ""
     try:
         _picked = timezone_select(_initial)

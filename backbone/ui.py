@@ -52,7 +52,7 @@ def ms_since_resize_signal() -> float:
     diagnostics log, to show how far behind the resize a redraw landed."""
     return (_time.monotonic() - _last_resize_signal) * 1000
 
-# SIGWINCH doesn't exist on Windows; guard so importing ui_utils never raises there.
+# SIGWINCH doesn't exist on Windows; guard so importing ui never raises there.
 _HAS_SIGWINCH = hasattr(signal, "SIGWINCH")
 if _HAS_SIGWINCH:
     signal.signal(signal.SIGWINCH, _sigwinch_handler)
@@ -83,7 +83,7 @@ MARGIN_V = 1   # rows reserved on each vertical side (top and bottom)
 
 # Now-playing box transport geometry, shared so both places that depend on it
 # can't drift apart: `now_playing_box.format_now_playing_bar` draws the glyphs here
-# and `prompt_core.footer_click_action` maps a click back to the one under
+# and `prompt.core.footer_click_action` maps a click back to the one under
 # the pointer. (start column, width) of ⏸/⏵ and ⏭ in the box's content columns.
 #
 # No previous-track button: the box is an ambient reminder of what is playing,
@@ -233,7 +233,7 @@ _screen_invalidator = None
 def set_screen_invalidator(fn) -> None:
     """Register the painter's "forget what's on screen" hook.
 
-    Registered by `prompt_core` (which can't be imported here, as it imports this
+    Registered by `prompt.core` (which can't be imported here, as it imports this
     module), so every existing `clear_screen()` keeps meaning "the screen is now
     blank" for the diffed painter as well.
     """
@@ -891,9 +891,9 @@ def header_box(left: str, right: str, cols: int, spin: str = "") -> list:
     gives way first.
 
     Bakes in its own MARGIN_H left indent (matching every hand-written
-    widget line in prompt.py/prompt_core.py - e.g. confirm()'s
+    widget line in backbone/prompt/ - e.g. confirm()'s
     f"  {message}") rather than relying on a wrapper to add it: a caller
-    driving its view through _Widget.render() (prompt_core.py) gets no
+    driving its view through _Widget.render() (prompt/core.py) gets no
     such wrapper, since _Widget only manages the vertical margin itself.
     """
     interior = cols - 2
@@ -920,7 +920,7 @@ def wrap_margins(lines: list, width: int = None) -> str:
     back* frame render (pair with an `ESC[H` cursor-home beforehand).
 
     Joins with \\r\\n, not \\n: raw terminal mode (tty.setraw, used by
-    backbone.prompt_core for key reading) clears OPOST, so the terminal
+    backbone.prompt.core for key reading) clears OPOST, so the terminal
     stops translating a bare \\n into a carriage return - every line after
     the first would otherwise start wherever the previous one ended instead
     of column 1.

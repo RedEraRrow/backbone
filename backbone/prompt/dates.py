@@ -4,17 +4,17 @@ import re
 import sys
 import datetime
 import calendar as cal
-from backbone.prompt_core import (
+from backbone.prompt.core import (
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, block_cursor,
     _read_key, _Widget, screen_takeover_next,
 )
-from backbone import ui as ui_utils
+from backbone import ui
 from backbone import datetime_parse as dtp
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _MODE_TOGGLE_KEY, _with_toggle_hint, append_chrome, consume_chrome, disable_mouse, enable_mouse
 from backbone.prompt.text import text
-from backbone.prompt_core import C
+from backbone.prompt.core import C
 
 
 def _is_leap_year(year: int) -> bool:
@@ -83,7 +83,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
 
         # Header
         lines.append(f"  {C.DIM}{message}{C.RESET}")
-        lines.append(f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}")
+        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
         # Month/Year display
         month_name = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -91,7 +91,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
 
         lines.append(f"  {C.BOLD}{month_name} {y}{C.RESET}")
 
-        lines.append(f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}")
+        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
         # Day headers
         day_headers = "Mo Tu We Th Fr Sa Su"
@@ -114,7 +114,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
                         week_parts.append(f"{day:2d} ")
             lines.append(f"  {''.join(week_parts)}")
 
-        lines.append(f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}")
+        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
         if not day_mode:
             _cal_pairs = [("↵", "save"), ("esc", "back"), ("q", "quit app"),
@@ -136,8 +136,8 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
         _render()
 
         while True:
-            if ui_utils.consume_resize():
-                ui_utils.clear_screen()
+            if ui.consume_resize():
+                ui.clear_screen()
                 w.anchor_reset()
                 _render()
                 continue
@@ -237,7 +237,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
                     if parsed:
                         y, m, d = parsed
                         cursor_day = d
-                ui_utils.clear_screen()
+                ui.clear_screen()
                 enable_mouse()           # text() turns it off on its way out
                 w.anchor_reset()
 
@@ -322,14 +322,14 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
         lines = []
 
         lines.append(f"  {C.DIM}{message}{C.RESET}")
-        lines.append(f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}")
+        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
         # Date section
         month_name = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month]
         dpfx = C.BOLD if section == 'date' else C.DIM
         lines.append(f"  {dpfx}{month_name} {year}{C.RESET}")
-        lines.append(f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}")
+        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
         lines.append("  Mo Tu We Th Fr Sa Su")
 
         for week in cal.monthcalendar(year, month):
@@ -344,7 +344,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                     parts.append(f"{day:2d} ")
             lines.append(f"  {''.join(parts)}")
 
-        lines.append(f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}")
+        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
         # Time section
         tpfx = C.BOLD if section == 'time' else C.DIM
@@ -362,7 +362,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
             elif i == 2: row += "."
         lines.append(row)
 
-        lines.append(f"{C.DIM}{'─' * ui_utils.get_terminal_width()}{C.RESET}")
+        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
         h = ""
         if section == 'date':
@@ -401,8 +401,8 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
         _render()
 
         while True:
-            if ui_utils.consume_resize():
-                ui_utils.clear_screen()
+            if ui.consume_resize():
+                ui.clear_screen()
                 w.anchor_reset()
                 _render()
                 continue

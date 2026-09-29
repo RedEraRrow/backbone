@@ -7,8 +7,9 @@ name = "backbone"
 version = "0.1.0"
 description = "Shared code for the back* tools: terminal UI, prompt widgets, live views, logging, dates, settings plumbing and small file helpers, implemented once."
 requires-python = ">=3.10"
+readme = "README.md"
 license = { text = "MIT" }
 dependencies = []
 
-[tool.setuptools]
-packages = ["backbone", "backbone.prompt"]
+[tool.setuptools.packages.find]
+include = ["backbone*"]

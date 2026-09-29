@@ -4,16 +4,16 @@ import sys
 import os
 import tempfile
 import subprocess
-from backbone.prompt_core import (
+from backbone.prompt.core import (
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, _render_status_bar,
     block_cursor, block_cursor_width, _read_key, _cols, _wrap_bordered_input_lines,
     screen_paint, screen_invalidate, screen_takeover_next,
 )
-from backbone import ui as ui_utils
+from backbone import ui
 from backbone.prompt import chrome
 from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _MODE_TOGGLE_KEY, append_chrome, consume_chrome, disable_mouse, enable_mouse
-from backbone.prompt_core import C
-from backbone.prompt_core import edit_line
+from backbone.prompt.core import C
+from backbone.prompt.core import edit_line
 
 
 def text(message: str, default: str = "") -> str | None:
@@ -69,8 +69,8 @@ def text(message: str, default: str = "") -> str | None:
 
         # One diffed frame (no full erase, no newlines): only the rows that
         # actually changed are written, so typing doesn't repaint the screen.
-        frame = {i + 1: line for i, line in enumerate([""] * ui_utils.MARGIN_V + out)}
-        for r in range(len(frame) + 1, prev_lines + ui_utils.MARGIN_V + 1):
+        frame = {i + 1: line for i, line in enumerate([""] * ui.MARGIN_V + out)}
+        for r in range(len(frame) + 1, prev_lines + ui.MARGIN_V + 1):
             frame[r] = ""
         screen_paint(frame)          # the caret is drawn, not the terminal's own
 
@@ -83,8 +83,8 @@ def text(message: str, default: str = "") -> str | None:
         screen_takeover_next()   # paint over the previous screen, no flash
         _render()
         while True:
-            if ui_utils.consume_resize():
-                ui_utils.clear_screen()
+            if ui.consume_resize():
+                ui.clear_screen()
                 _render()
                 continue
             if not _wait_for_keypress(0.05): continue
@@ -113,7 +113,7 @@ def text(message: str, default: str = "") -> str | None:
     finally:
         disable_mouse()
         _restore_term_attrs(fd, old)
-        ui_utils.clear_screen()
+        ui.clear_screen()
         sys.stdout.write(C.HIDE)   # caret was ours; don't leave it blinking
         sys.stdout.flush()
 
@@ -236,8 +236,8 @@ def path(message: str, default: str = "") -> str | None:
         append_chrome(out, pairs, _hint_cells)
 
         # One diffed frame; see text() above.
-        frame = {i + 1: line for i, line in enumerate([""] * ui_utils.MARGIN_V + out)}
-        for r in range(len(frame) + 1, _prev_rendered + ui_utils.MARGIN_V + 2):
+        frame = {i + 1: line for i, line in enumerate([""] * ui.MARGIN_V + out)}
+        for r in range(len(frame) + 1, _prev_rendered + ui.MARGIN_V + 2):
             frame[r] = ""
         screen_paint(frame)          # the caret is drawn, not the terminal's own
         _render_status_bar()
@@ -250,7 +250,7 @@ def path(message: str, default: str = "") -> str | None:
         _render()
 
         while True:
-            if ui_utils.consume_resize(): _render()
+            if ui.consume_resize(): _render()
             if not _wait_for_keypress(0.05): continue
             key = _read_key(fd)
 
@@ -303,7 +303,7 @@ def path(message: str, default: str = "") -> str | None:
     finally:
         disable_mouse()
         _restore_term_attrs(fd, old)
-        ui_utils.clear_screen()
+        ui.clear_screen()
         sys.stdout.write(C.HIDE)   # caret was ours; don't leave it blinking
         sys.stdout.flush()
 
@@ -349,7 +349,7 @@ def system_editor_edit(initial_text: str) -> str | None:
             result = f.read().strip()
         return result if result else None
     except (OSError, subprocess.CalledProcessError) as e:
-        ui_utils.show_status(f"Error launching editor: {e}")
+        ui.show_status(f"Error launching editor: {e}")
         return None
     finally:
         if os.path.exists(temp_path):

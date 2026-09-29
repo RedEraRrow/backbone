@@ -12,22 +12,25 @@ from backbone import files, notify, procs
 class ProcsTest(unittest.TestCase):
     def test_start_find_stop(self):
         d = Path(tempfile.mkdtemp())
-        script = d / "fakedaemon.py"
-        script.write_text("import time\ntime.sleep(30)\n")
-        procs.spawn_script(script, d / "fakedaemon.out")
+        (d / "fakepkg").mkdir()
+        (d / "fakepkg" / "fakedaemon.py").write_text("import time\ntime.sleep(30)\n")
+        os.environ["PYTHONPATH"] = str(d)
+        procs.spawn_module("fakepkg.fakedaemon", d / "fakedaemon.out")
+        find = lambda name: procs.find_processes(name, launcher="fakepkg")
         for _ in range(50):
-            if procs.find_processes("fakedaemon"):
+            if find("fakedaemon"):
                 break
             time.sleep(0.1)
-        found = procs.find_processes("fakedaemon")
+        found = find("fakedaemon")
         self.assertEqual(len(found), 1, found)
-        self.assertEqual(procs.find_processes("someotherdaemon"), [])
-        self.assertEqual(procs.stop_processes("fakedaemon"), 1)
+        self.assertEqual(find("someotherdaemon"), [])
+        self.assertEqual(procs.find_processes("fakedaemon"), [], "only matched as the launcher's module")
+        self.assertEqual(procs.stop_processes("fakedaemon", launcher="fakepkg"), 1)
         for _ in range(50):
-            if not procs.find_processes("fakedaemon"):
+            if not find("fakedaemon"):
                 break
             time.sleep(0.1)
-        self.assertEqual(procs.find_processes("fakedaemon"), [])
+        self.assertEqual(find("fakedaemon"), [])
 
 
 class FilesTest(unittest.TestCase):

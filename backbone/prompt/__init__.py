@@ -1,7 +1,7 @@
 """The prompt widgets, one import: lists (select, live_select, confirm,
 ListPlace), text (text, path, system_editor_edit), list_edit, dates, values,
 audio, and the shared chrome."""
-from backbone.prompt_core import (  # noqa: F401
+from backbone.prompt.core import (  # noqa: F401
     Choice, Column, separator, HINTS_CLICK, add_help_corner, add_hint_click_cells,
     help_corner_text, hints_visible, rounded_header, toggle_hints,
 )
