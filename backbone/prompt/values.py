@@ -5,10 +5,10 @@ from backbone.prompt.core import (
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, block_cursor,
     _read_key, _Widget, screen_takeover_next,
 )
-from backbone import ui
+from backbone import keys, ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
-from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _MODE_TOGGLE_KEY, _with_toggle_hint, append_chrome, consume_chrome, disable_mouse, enable_mouse
+from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _with_toggle_hint, append_chrome, consume_chrome, disable_mouse, enable_mouse
 from backbone.prompt.core import C
 
 
@@ -132,7 +132,7 @@ def fraction_edit(message: str = "Edit metadata pair:",
                 w.anchor_reset(); _render(); continue
             if _ch is not None:
                 key = _ch
-            if chrome._value_toggle_enabled and key == _MODE_TOGGLE_KEY:
+            if chrome.is_mode_toggle(key):
                 return MODE_TOGGLE  # type: ignore[return-value]
             current_field = field_order[cursor_field]
             buf = edit_buffers[current_field]
@@ -258,7 +258,7 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
         lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
         append_chrome(lines, _with_toggle_hint(
             [('↵', 'save'), ('tab/⇧tab', 'field'),
-             ('esc', 'back'), ('q', 'quit app')]), _hint_cells)
+             ('esc', 'back'), (keys.label('list.quit'), 'quit app')]), _hint_cells)
         w.render(lines)
 
     result = None
@@ -288,7 +288,7 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
                 w.anchor_reset(); _render(); continue
             if _ch is not None:
                 key = _ch
-            if chrome._value_toggle_enabled and key == _MODE_TOGGLE_KEY:
+            if chrome.is_mode_toggle(key):
                 return MODE_TOGGLE  # type: ignore[return-value]
             current_field = field_order[cursor_field]
             buf = fields[current_field]
@@ -307,7 +307,7 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
                     ui.show_status("Invalid time (need hours < 24, minutes/seconds < 60)")
             elif key in ('ESC', 'CTRL_C'):      # Ctrl-C cancels, as in every widget
                 break
-            elif key in ('q', 'Q'):
+            elif keys.pressed(key, 'list.quit'):
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
             elif key in ('TAB', 'BACKTAB'):
                 # Shift+Tab is Tab in reverse, on every screen that has fields.
@@ -384,8 +384,8 @@ def number_edit(message: str = "Edit number:", *, value: int = 0,
         ]
         append_chrome(lines, _with_toggle_hint(
             [("↑↓", "±1"), ("⇞⇟", "±10"),
-             ("↵", "save"), ("esc", "back"), ("q", "quit app")]),
-                      _hint_cells, i_key=True)
+             ("↵", "save"), ("esc", "back"), (keys.label("list.quit"), "quit app")]),
+                      _hint_cells, help_key=True)
         w.render(lines)
 
     result = None
@@ -413,7 +413,7 @@ def number_edit(message: str = "Edit number:", *, value: int = 0,
                 w.anchor_reset(); _render(); continue
             if _ch is not None:
                 key = _ch
-            if chrome._value_toggle_enabled and key == _MODE_TOGGLE_KEY:
+            if chrome.is_mode_toggle(key):
                 return MODE_TOGGLE
             if key == 'CTRL_C':
                 result = None; break
@@ -421,7 +421,7 @@ def number_edit(message: str = "Edit number:", *, value: int = 0,
                 result = _cur(); break
             elif key == 'ESC':
                 result = None; break
-            elif key in ('q', 'Q'):
+            elif keys.pressed(key, 'list.quit'):
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
             elif key.isdigit():
                 if len("".join(buf)) < 12:
@@ -504,7 +504,7 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
         # e-mail) just typing, where q is a letter, not quit.
         pairs = [("tab/⇧tab", "field")]
         pairs += {0: [("←→", "stars")], 1: [("←→", "±1"), ("⇞⇟", "±10")]}.get(field, [])
-        pairs += [("↵", "save"), ("esc", "back")] + ([("q", "quit app")] if field != 2 else [])
+        pairs += [("↵", "save"), ("esc", "back")] + ([(keys.label("list.quit"), "quit app")] if field != 2 else [])
         append_chrome(lines, pairs, _hint_cells)
         w.render(lines)
 
@@ -544,7 +544,7 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
                 field = (field + (-1 if key == 'BACKTAB' else 1)) % 3
                 _render()
             # 'q' quits only outside the free-text Rater field (an email may contain 'q').
-            elif key in ('q', 'Q') and field != 2:   # field 2 is the e-mail text
+            elif keys.pressed(key, 'list.quit') and field != 2:   # field 2 is the e-mail text
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
             elif field == 0:
                 if key in ('LEFT', 'DOWN'):

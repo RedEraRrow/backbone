@@ -5,7 +5,7 @@ from backbone.prompt.core import (
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, _read_key, _cols,
     _Widget, _hint_pin_target, screen_takeover_next,
 )
-from backbone import ui
+from backbone import keys, ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt.chrome import (
     append_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse,
@@ -56,6 +56,25 @@ _EQ_PRESETS = [
 
 
 _EQ_UP_BLOCKS = ' ▁▂▃▄▅▆▇'
+
+
+
+# The volume-adjustment (RVA2) and equaliser editors.
+keys.define("levels", "Volume and equaliser", [
+    ("up", ("UP",), "raise"),
+    ("down", ("DOWN",), "lower"),
+    ("up_big", ("PGUP",), "raise by 3"),
+    ("down_big", ("PGDN",), "lower by 3"),
+    ("zero", ("0",), "back to zero"),
+    ("prev_band", ("LEFT",), "previous band (equaliser)"),
+    ("next_band", ("RIGHT",), "next band (equaliser)"),
+    ("add", ("a", "A"), "add a band (equaliser)"),
+    ("delete", ("d", "D", "BACKSPACE", "DELETE"), "delete the band (equaliser)"),
+    ("flat", ("f", "F"), "flatten every band (equaliser)"),
+    ("preset", ("p", "P"), "next preset (equaliser)"),
+    ("save", ("ENTER",), "save"),
+    ("back", ("ESC",), "back"),
+], within=("list", "global"))
 
 
 def _eq_fmt_freq(freq: float) -> str:
@@ -254,8 +273,10 @@ def rva2_edit(message: str = "Volume adjustment:", gain: float = 0.0) -> float |
         # Budget the meter against the rows left once this widget's own chrome
         # (message, rule, readout, trailing blank) and the hint bar (which grows
         # by two lines when the transport keys join it) are accounted for.
-        _pairs = [("↑↓", "adjust"), ("⇞⇟", "±3 dB"), ("0", "zero"),
-                  ("↵", "save"), ("esc", "back"), ("q", "quit app")]
+        L = keys.label
+        _pairs = [(L("levels.up", "levels.down"), "adjust"), (L("levels.up_big", "levels.down_big"), "±3 dB"),
+                  (L("levels.zero"), "zero"), (L("levels.save"), "save"), (L("levels.back"), "back"),
+                  (L("list.quit"), "quit app")]
         _avail = _hint_pin_target() - 4 - len(chrome_hint_lines(_pairs))
         lines = _rva2_render_lines(gain, message, avail=_avail)
         lines.append(f"  {C.ACCENT}▸{C.RESET} {C.BOLD}{gain:+.1f} dB{C.RESET}")
@@ -289,21 +310,22 @@ def rva2_edit(message: str = "Volume adjustment:", gain: float = 0.0) -> float |
             if _ch is not None:
                 key = _ch
 
-            if key == 'ENTER':
+            act = keys.action(key, "levels")
+            if act == 'levels.save':
                 result = gain; break
-            elif key in ('ESC', 'CTRL_C'):      # Ctrl-C cancels, as in every widget
+            elif key == 'CTRL_C' or act == 'levels.back':     # Ctrl-C cancels, as in every widget
                 result = None; break
-            elif key in ('q', 'Q'):
+            elif act == 'list.quit':
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
-            elif key in ('UP', 'SCROLL_UP'):
+            elif act == 'levels.up' or key == 'SCROLL_UP':
                 gain = _clamp(gain + _RVA2_STEP); _render()
-            elif key in ('DOWN', 'SCROLL_DOWN'):
+            elif act == 'levels.down' or key == 'SCROLL_DOWN':
                 gain = _clamp(gain - _RVA2_STEP); _render()
-            elif key == 'PGUP':
+            elif act == 'levels.up_big':
                 gain = _clamp(gain + _RVA2_COARSE); _render()
-            elif key == 'PGDN':
+            elif act == 'levels.down_big':
                 gain = _clamp(gain - _RVA2_COARSE); _render()
-            elif key == '0':
+            elif act == 'levels.zero':
                 gain = 0.0; _render()
 
     finally:
@@ -357,15 +379,18 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
             if note:
                 status += f"   {C.DIM}· {note}{C.RESET}"
         else:
-            status = f"{C.DIM}no bands: [a] add one{C.RESET}"
+            status = f"{C.DIM}no bands: [{keys.label('levels.add', first=True)}] add one{C.RESET}"
         # Size the plot to the rows left above the pinned hint bar and the
         # now-playing box, not to the whole terminal.
-        _pairs = [("↑↓", "gain"), ("←→", "band"), ("⇞⇟", "±3"), ("a", "add"),
-                  ("d", "delete"), ("0", "zero"), ("f", "flat"), ("p", "preset"),
-                  ("↵", "save"), ("esc", "back"), ("q", "quit app")]
+        L = keys.label
+        _pairs = [(L("levels.up", "levels.down"), "gain"), (L("levels.prev_band", "levels.next_band"), "band"),
+                  (L("levels.up_big", "levels.down_big"), "±3"), (L("levels.add"), "add"),
+                  (L("levels.delete", most=1), "delete"), (L("levels.zero"), "zero"), (L("levels.flat"), "flat"),
+                  (L("levels.preset"), "preset"), (L("levels.save"), "save"), (L("levels.back"), "back"),
+                  (L("list.quit"), "quit app")]
         lines = _eq_render_lines(bands, cursor, message, status, _cols(),
                                  _hint_pin_target() - len(chrome_hint_lines(_pairs)))
-        append_chrome(lines, _pairs, _hint_cells, i_key=True)
+        append_chrome(lines, _pairs, _hint_cells, help_key=True)
         w.render(lines)
 
     result = None
@@ -396,40 +421,41 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
                 key = _ch
             n = len(bands)
 
-            if key == 'ENTER':
+            act = keys.action(key, "levels")
+            if act == 'levels.save':
                 result = _save(); break
-            elif key in ('ESC', 'CTRL_C'):      # Ctrl-C cancels, as in every widget
+            elif key == 'CTRL_C' or act == 'levels.back':     # Ctrl-C cancels, as in every widget
                 result = None; break
-            elif key in ('q', 'Q'):
+            elif act == 'list.quit':
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
-            elif key == 'LEFT' and n:
+            elif act == 'levels.prev_band' and n:
                 cursor = (cursor - 1) % n; note = ""; _render()
-            elif key == 'RIGHT' and n:
+            elif act == 'levels.next_band' and n:
                 cursor = (cursor + 1) % n; note = ""; _render()
-            elif key == 'UP' and n:
+            elif act == 'levels.up' and n:
                 bands[cursor][1] = _clamp(bands[cursor][1] + _EQ_STEP); _render()
-            elif key == 'DOWN' and n:
+            elif act == 'levels.down' and n:
                 bands[cursor][1] = _clamp(bands[cursor][1] - _EQ_STEP); _render()
-            elif key == 'PGUP' and n:
+            elif act == 'levels.up_big' and n:
                 bands[cursor][1] = _clamp(bands[cursor][1] + _EQ_COARSE); _render()
-            elif key == 'PGDN' and n:
+            elif act == 'levels.down_big' and n:
                 bands[cursor][1] = _clamp(bands[cursor][1] - _EQ_COARSE); _render()
             elif key == 'SCROLL_UP' and n:
                 bands[cursor][1] = _clamp(bands[cursor][1] + _EQ_STEP); _render()
             elif key == 'SCROLL_DOWN' and n:
                 bands[cursor][1] = _clamp(bands[cursor][1] - _EQ_STEP); _render()
-            elif key == '0' and n:
+            elif act == 'levels.zero' and n:
                 bands[cursor][1] = 0.0; _render()
-            elif key in ('f', 'F'):
+            elif act == 'levels.flat':
                 for b in bands:
                     b[1] = 0.0
                 note = "flattened"; _render()
-            elif key in ('p', 'P'):
+            elif act == 'levels.preset':
                 preset_idx = (preset_idx + 1) % len(_EQ_PRESETS)
                 name, gains = _EQ_PRESETS[preset_idx]
                 bands[:] = [[float(f), float(gains.get(f, 0.0))] for f in _EQ_ISO_BANDS]
                 note = f"preset: {name}"; _render()
-            elif key in ('a', 'A'):
+            elif act == 'levels.add':
                 _restore_term_attrs(fd, old)
                 disable_mouse()
                 freq_str = text("Add band frequency (Hz):")
@@ -448,7 +474,7 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
                     except ValueError:
                         pass
                 _render()
-            elif key in ('d', 'D', 'BACKSPACE', 'DELETE') and n:
+            elif act == 'levels.delete' and n:
                 bands.pop(cursor)
                 cursor = min(cursor, len(bands) - 1) if bands else 0
                 note = ""; _render()

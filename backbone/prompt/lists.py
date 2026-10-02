@@ -8,12 +8,13 @@ from backbone.prompt.core import (
     _COLUMNS_MAX_WIDTH, _EDGE_MARGIN, _get_term_attrs, _set_raw, _restore_term_attrs,
     _wait_for_keypress, _table_widths, _render_table_row, _clip_ansi, _norm, block_cursor,
     _read_key, _visible_rows, _cols, _Widget, _hint_pin_target, screen_takeover_next,
+    Choice, Column, rounded_header,
 )
-from backbone import ui
+from backbone import keys, ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import (
-    append_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, MOVE_DOWN_KEY, MOVE_HINT, MOVE_UP_KEY, _plain,
+    append_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, move_hint, _plain,
 )
 from backbone.prompt.core import C
 from backbone.prompt.core import edit_line
@@ -70,7 +71,161 @@ def select(message: str, choices: list, *,
            ) -> list[Any] | None: ...
 
 
-def select(message: str, choices: list, *,
+keys.define("list", "Lists", [
+    ("up", ("UP",), "previous row"),
+    ("down", ("DOWN",), "next row"),
+    ("page_up", ("PGUP",), "a page up"),
+    ("page_down", ("PGDN",), "a page down"),
+    ("top", ("HOME",), "first row"),
+    ("bottom", ("END",), "last row"),
+    ("choose", ("ENTER", "RIGHT"), "choose the row"),
+    ("toggle", ("SPACE",), "tick the row (lists with ticks)"),
+    ("toggle_all", ("a", "A"), "tick or clear every row (lists with ticks)"),
+    ("back", ("ESC", "b", "LEFT"), "back"),
+    ("quit", ("q", "Q"), "quit the app"),
+    ("sections", ("/",), "a long list's sections, or the whole list"),
+    ("row_options", ("o",), "everything you can do with the row"),
+    ("list_options", ("O",), "everything you can do with the whole list"),
+])
+# The live search lists: typing goes into the query, so their keys are the
+# ones that can't be typed.
+keys.define("search", "Search lists", [
+    ("up", ("UP",), "previous result"),
+    ("down", ("DOWN",), "next result"),
+    ("page_up", ("PGUP",), "five results up"),
+    ("page_down", ("PGDN",), "five results down"),
+    ("choose", ("ENTER",), "choose the result"),
+    ("next_section", ("TAB",), "next section"),
+    ("prev_section", ("BACKTAB",), "previous section"),
+    ("back", ("ESC",), "back"),
+])
+keys.define("confirm", "Yes/no questions", [
+    ("yes", ("y", "Y"), "yes"),
+    ("no", ("n", "N"), "no"),
+    ("default", ("ENTER",), "the default answer"),
+    ("back", ("ESC",), "back (answers no)"),
+])
+L = keys.label
+
+
+def _scroll(viewport: int, cursor: int, vis: int, items: list) -> int:
+    """The first row to show so the cursor is in view. A section heading (the
+    run of disabled rows just above the cursor) comes into view with its first
+    row, so the top of a list never reads "1 above" with only a heading there.
+    Growing the window (or deleting rows) leaves the viewport further down than
+    it needs to be, leaving "N above" with blank space below: it's pulled back
+    so the last row of the list sits on the last visible row at most."""
+    if cursor < viewport:
+        viewport = cursor
+    elif cursor >= viewport + vis:
+        viewport = cursor - vis + 1
+    top = cursor
+    while top > 0 and items[top - 1].disabled:
+        top -= 1
+    if top < viewport and cursor - top < vis:
+        viewport = top
+    return max(0, min(viewport, len(items) - vis))
+
+
+def options_menu(title: str, entries: list) -> Any:
+    """A menu of what can be done, each with the key that does it directly:
+    `entries` are (label, key text, value); returns the value picked, or None."""
+    if not entries:
+        return None
+    choices = [Choice(title=label, value=i, cells=[label, key_text])
+               for i, (label, key_text, _v) in enumerate(entries)]
+    i = select("", choices, columns=[Column(style='primary'), Column(style='dynamic-dim', flex=True)],
+               header=lambda: rounded_header(title or "Options", "", "options"))
+    return None if i is None else entries[i][2]
+
+
+# A list in sections (separator() headings) this much longer than the screen
+# opens as its section titles: ↵ opens one as its own list, / shows the whole.
+_SECTION_SLACK = 1.2
+_TO_WHOLE, _TO_SECTIONS = object(), object()
+# Per sectioned list (keyed by its section titles): whether the whole list was
+# asked for, and which section is open, so a caller that redraws its list after
+# each change (Settings, Key bindings) comes back to the same section.
+_section_memo: dict = {}
+
+
+def _sections(items: list) -> list[tuple[str, list]] | None:
+    """(title, rows) for each titled section, or None when the list isn't
+    headed throughout. A blank separator stays inside its section; a greyed
+    row (disabled, with cells) is a row, not a heading."""
+    out: list[tuple[str, list]] = []
+    for it in items:
+        if it.disabled and not it.cells and str(it.title).strip():
+            out.append((str(it.title), []))
+        elif not out:
+            return None                    # rows before the first heading
+        else:
+            out[-1][1].append(it)
+    return out if len(out) > 1 else None
+
+
+def select(message: str, choices: list, **kw) -> Any:
+    """Arrow keys to navigate; Enter / → to confirm; ← / b / Esc → None; q
+    quits the app. See _select_flat for every option.
+
+    A single-choice list in sections that is much taller than the screen
+    (_SECTION_SLACK) opens as its section titles; ↵ opens a section as its own
+    list (Esc back to the titles) and list.sections (/) switches between that
+    and the whole list, remembered per list."""
+    items = _norm(choices)
+    sections = None if kw.get('multi') else _sections(items)
+    if not sections:
+        return _select_flat(message, items, **kw)
+    # 'whole': None until / is pressed: then the list's length decides, each time.
+    memo = _section_memo.setdefault(tuple(t for t, _ in sections), {'whole': None, 'open': None})
+    if memo['whole'] is None and len(items) <= _visible_rows() * _SECTION_SLACK:
+        return _select_flat(message, items, **kw)
+    # The row the caller wants to land on (where the list was left).
+    place = kw.get('place')
+    want = (place.value if place is not None and place.value is not None
+            else items[max(0, min(kw.get('index', 0), len(items) - 1))].value)
+    def _with_toggle(to, label) -> dict:
+        return {**kw, 'shortcuts': {**(kw.get('shortcuts') or {}), 'list.sections': to},
+                'extra_hints': {**(kw.get('extra_hints') or {}), 'list.sections': label}}
+
+    while True:
+        if memo['whole']:
+            res = _select_flat(message, items, **_with_toggle(_TO_SECTIONS, "sections"))
+            if res is _TO_SECTIONS:
+                memo['whole'] = False
+                continue
+            return res
+        titles = [t for t, _ in sections]
+        if memo['open'] in titles:
+            rows = sections[titles.index(memo['open'])][1]
+            pos = next((i for i, it in enumerate(rows) if not it.disabled and it.value == want), 0)
+            res = _select_flat(memo['open'] if not message else f"{message}  {memo['open']}", rows,
+                               **{**_with_toggle(_TO_WHOLE, "whole list"), 'index': pos})
+            if res is _TO_WHOLE:
+                memo['whole'], memo['open'] = True, None
+                continue
+            if res is None:                     # back to the section titles
+                want = memo['open']
+                memo['open'] = None
+                continue
+            return res
+        here = next((t for t, rows in sections if any(it.value == want for it in rows)), want)
+        res = _select_flat(message, [Choice(t, value=t, cells=[t, f"{sum(not it.disabled for it in rows)}"])
+                                     for t, rows in sections],
+                           header=kw.get('header'), allow_back=kw.get('allow_back', True),
+                           columns=[Column(style='primary'), Column(style='dynamic-dim', flex=True)],
+                           index=titles.index(here) if here in titles else 0,
+                           shortcuts={'list.sections': _TO_WHOLE}, extra_hints={'list.sections': "whole list"})
+        if res is _TO_WHOLE:
+            memo['whole'] = True
+            continue
+        if res is None:
+            return None
+        memo['open'] = res
+        want = None
+
+
+def _select_flat(message: str, choices: list, *,
            header: list | None | Callable[[], list[str]] = None,
            extra_hints: dict[str, str] | None = None,
            index: int = 0,
@@ -90,6 +245,10 @@ def select(message: str, choices: list, *,
            actions: list[tuple[str, str, str]] | None = None,
            on_move: Callable[[Any, int], bool] | None = None,
            place: ListPlace | None = None,
+           row_action_applies: Callable[[str, Any], bool] | None = None,
+           list_actions: dict[str, Callable[[], Any]] | None = None,
+           list_action_hints: dict[str, str] | None = None,
+           choose_label: str | None = None,
            ) -> Any:
     """Arrow keys to navigate; Enter / → to confirm; ← / b / Esc → None; q quits the app.
 
@@ -100,7 +259,9 @@ def select(message: str, choices: list, *,
     Args:
         message:    Prompt label shown above the list.
         choices:    Items: str, dict, or Choice objects.
-        header:     Optional lines rendered above the prompt.
+        header:     Optional lines rendered above the prompt: a callable
+                    returning them, rebuilt every frame, for anything sized to
+                    the window (a boxed header), or it keeps its first width.
         extra_hints: Extra key→action bindings merged into the hint bar.
         index:      Initial cursor position.
         place:      A ListPlace to start from and record where the list was left
@@ -139,14 +300,48 @@ def select(message: str, choices: list, *,
             itself: each is listed first in the hint bar, and its key (or a
             click on it there) returns value.
         on_move:    (row value, -1 up / +1 down) → whether the caller moved it.
-            MOVE_UP_KEY / MOVE_DOWN_KEY call it for the highlighted row, and on
+            The list.move_up / list.move_down keys call it for the highlighted row, and on
             True the row swaps with its neighbour on screen and the cursor
             follows. Never called past a separator or the ends of the list.
+        row_action_applies: (row action key or id, row value) → whether that
+            action means something for the row; the others are left out of
+            the row's options menu (and do nothing on it).
+        list_actions: key or id → callback() acting on the whole list and
+            staying in it, like row_actions without a row; labels in
+            list_action_hints. A callback returning something other than None
+            ends the list with that.
+        choose_label: what ↵ does to a row ("Play", "Open"), for the top of
+            the row's options menu.
+
+    Options menus: list.row_options (o) lists everything that can be done
+    with the highlighted row (↵, on_inspect, the row actions that apply),
+    list.list_options (O) everything for the whole list (actions, shortcuts,
+    list_actions), each with its key, so actions without a key are
+    reachable too. Picking one does exactly what its key does.
     """
     items = _norm(choices)
+    # The list's options menu (O) leads with its actions, then its shortcuts.
+    _list_specs = [k for k, _label, _v in (actions or [])] + [k for k in (shortcuts or {})
+                                                                  if k not in {a[0] for a in actions or []}]
+    # Any key below may be given as an action id (backbone.keys): every key
+    # bound to it works, and its hint shows them.
     if actions:
         shortcuts   = {**(shortcuts or {}), **{k: v for k, _label, v in actions}}
         extra_hints = {**{k: label for k, label, _v in actions}, **(extra_hints or {})}
+    # The options menus list these as given (an action may have no key yet),
+    # with the caller's labels; an id also works as its own key, for the menu.
+    _labels = {**(extra_hints or {}), **(row_action_hints or {}), **(list_action_hints or {})}
+    _row_specs = list(row_actions or {})
+    _list_act_specs = list(list_actions or {})
+    shortcuts = {**keys.expand(shortcuts), **(shortcuts or {})}
+    row_actions = {**keys.expand(row_actions), **(row_actions or {})}
+    list_actions = {**keys.expand(list_actions), **(list_actions or {})}
+    extra_hints = {keys.hint_for(k): v for k, v in (extra_hints or {}).items()}
+    row_action_hints = {keys.hint_for(k): v for k, v in (row_action_hints or {}).items()}
+    row_action_hints.update({keys.hint_for(k): v for k, v in (list_action_hints or {}).items()})
+    inspect_keys = keys.keys_for(inspect_key) + (inspect_key,)
+    row_edit_keys = keys.keys_for(row_edit_key)
+    row_edit_key = keys.hint_for(row_edit_key)          # for the hints
     if not items:
         return None
 
@@ -203,15 +398,18 @@ def select(message: str, choices: list, *,
     base_hints: dict[str, str]
     # Toggle-all ('a') is offered only where it can't misbehave: multi-select with
     # no category interlock and no caller shortcut already bound to 'a'.
-    _toggle_all_ok = multi and interlock_category_callback is None and not (shortcuts and ('a' in shortcuts or 'A' in shortcuts))
-    _back_hint = {"esc/b": "back"} if allow_back else {}
+    _toggle_all_ok = multi and interlock_category_callback is None and not (
+        shortcuts and any(k in shortcuts for k in keys.of("list.toggle_all")))
+    _back_hint = {L("list.back", most=2): "back"} if allow_back else {}
+    _move = {L("list.up", "list.down"): "move"}
+    _end = {L("list.quit"): "quit app", L("list.choose", most=1): "confirm"}
     if multi:
-        base_hints = {"↑↓": "move", "space": "toggle", **_back_hint, "q": "quit app", "↵": "confirm"}
+        base_hints = {**_move, L("list.toggle"): "toggle", **_back_hint, **_end}
         if _toggle_all_ok:
-            base_hints = {"↑↓": "move", "space": "toggle", "a": "all",
-                          **_back_hint, "q": "quit app", "↵": "confirm"}
+            base_hints = {**_move, L("list.toggle"): "toggle", L("list.toggle_all"): "all",
+                          **_back_hint, **_end}
     else:
-        base_hints = {"↑↓": "move", **_back_hint, "q": "quit app", "↵": "confirm"}
+        base_hints = {**_move, **_back_hint, **_end}
 
     if extra_hints:
         combined_hints = {**extra_hints, **base_hints}
@@ -224,7 +422,38 @@ def select(message: str, choices: list, *,
                           **row_action_hints, **base_hints}
     if on_move is not None:
         combined_hints = {**{k: v for k, v in combined_hints.items() if k not in base_hints},
-                          MOVE_HINT[0]: MOVE_HINT[1], **base_hints}
+                          move_hint()[0]: move_hint()[1], **base_hints}
+    _opt_hints = {}
+    if on_inspect is not None or _row_specs or choose_label:
+        _opt_hints[L("list.row_options")] = "options"
+    if _list_specs or _list_act_specs:
+        _opt_hints[L("list.list_options")] = "list options"
+    combined_hints = {**{k: v for k, v in combined_hints.items() if k not in base_hints},
+                      **_opt_hints, **base_hints}
+
+    def _name(spec) -> str:
+        """A menu label for a key or action id: what the action does (the hint
+        text is too terse for a menu), else what the caller calls the key."""
+        text = keys.describe(spec) or _labels.get(spec) or str(spec)
+        return text[:1].upper() + text[1:]
+
+    def _row_menu() -> list:
+        it = items[cursor]
+        if it.disabled:
+            return []
+        out = []
+        if choose_label and not multi:
+            out.append((choose_label, L("list.choose", most=1), ("choose", None)))
+        if on_inspect is not None:
+            out.append((_name(inspect_key), keys.hint_for(inspect_key), ("key", inspect_key)))
+        for spec in _row_specs:
+            if row_action_applies is None or row_action_applies(spec, it.value):
+                out.append((_name(spec), keys.hint_for(spec), ("key", spec)))
+        return out
+
+    def _list_menu() -> list:
+        return ([(_name(s), keys.hint_for(s), ("key", s)) for s in _list_specs]
+                + [(_name(s), keys.hint_for(s), ("list", s)) for s in _list_act_specs])
 
     # Inline row edit (opt-in, see row_edit): the cycle sits at _edit_i over
     # _edit_opts, with one position past the end being the text field. While
@@ -254,12 +483,14 @@ def select(message: str, choices: list, *,
             return []
         return header() if callable(header) else list(header)
 
-    def _i_free() -> bool:
-        """Whether `i` can toggle the hints here: not bound by this list, and
+    def _help_key_free() -> bool:
+        """Whether `?` can toggle the hints here: not bound by this list, and
         not being typed into a cell."""
-        return not (_edit_on or 'i' in (shortcuts or {}) or 'i' in (row_actions or {})
-                    or (on_inspect is not None and inspect_key == 'i')
-                    or (row_edit is not None and row_edit_key == 'i'))
+        def bound(k):
+            return (k in shortcuts or k in row_actions
+                    or (on_inspect is not None and k in inspect_keys)
+                    or (row_edit is not None and k in row_edit_keys))
+        return not (_edit_on or any(bound(k) for k in keys.of("global.help")))
 
     def _editing_text() -> bool:
         """Whether the cycle has stepped past its options into the text field."""
@@ -314,14 +545,7 @@ def select(message: str, choices: list, *,
         vis     = max(2, _visible_rows() - fixed_overhead)
 
         n       = len(items)
-        if cursor < viewport:
-            viewport = cursor
-        elif cursor >= viewport + vis:
-            viewport = cursor - vis + 1
-        # Growing the window (or deleting rows) leaves the viewport further down
-        # than it needs to be, leaving "N above" with blank space below. Pull it
-        # back so the last row of the list sits on the last visible row at most.
-        viewport = max(0, min(viewport, n - vis))
+        viewport = _scroll(viewport, cursor, vis, items)
 
         out = h_lines[:]
         out.append(f"  {C.DIM}{message}{C.RESET}")
@@ -391,7 +615,7 @@ def select(message: str, choices: list, *,
         # centres within _cols() (= width-2*MARGIN_H), so this makes it symmetric.
         # Pin the hint bar to the bottom (just above the miniplayer + status) so
         # its keys keep a fixed screen position across redraws / list sizes.
-        append_chrome(out, hints_now, _hint_cells, extra=layout_constraint, i_key=_i_free())
+        append_chrome(out, hints_now, _hint_cells, extra=layout_constraint, help_key=_help_key_free())
         # Hard guarantee: no rendered line ever exceeds the terminal width, so
         # the list can never wrap no matter how narrow the window is.
         _w = ui.get_terminal_width()          # once per frame, not per line
@@ -440,7 +664,7 @@ def select(message: str, choices: list, *,
                     if chosen and row_edit_commit is not None:
                         row_edit_commit(items[cursor].value, chosen)
                     _edit_on = False
-                elif key in ('UP', 'DOWN') or (key == row_edit_key and not _editing_text()):
+                elif key in ('UP', 'DOWN') or (key in row_edit_keys and not _editing_text()):
                     step = -1 if key == 'UP' else 1
                     was = (_edit_opts[_edit_i] if not _editing_text()
                            else "".join(_edit_buf))
@@ -456,8 +680,30 @@ def select(message: str, choices: list, *,
                 w.render(_lines())
                 continue
 
+            act = keys.action(key, "list")
+            if act in ("list.row_options", "list.list_options"):
+                # Everything for the row (o) or the whole list (O): picking
+                # an entry does what its key does, from here on.
+                entries = _row_menu() if act == "list.row_options" else _list_menu()
+                title = (str(items[cursor].title) if act == "list.row_options" else message) or "This list"
+                picked = options_menu(title, entries) if entries else None
+                enable_mouse()
+                sys.stdout.flush()
+                _sel_last_click = None
+                w.anchor_reset()
+                if picked is None:
+                    w.render(_lines()); continue
+                kind, spec = picked
+                if kind == "choose":
+                    result = items[cursor].value; break
+                if kind == "list":
+                    _ret = list_actions[spec]()
+                    if _ret is not None:
+                        result = _ret; break
+                    w.render(_lines()); continue
+                key, act = spec, None           # as if its key were pressed
             if   key == 'CTRL_C':                break
-            elif key == row_edit_key and row_edit is not None and not items[cursor].disabled:
+            elif key in row_edit_keys and row_edit is not None and not items[cursor].disabled:
                 # Open the cycle on the row's current value; a second press steps
                 # to the next option (see the edit block above).
                 _edit_opts = [str(o) for o in (row_edit(items[cursor].value) or []) if str(o)]
@@ -467,13 +713,13 @@ def select(message: str, choices: list, *,
                 _edit_on = True
                 _sel_last_click = None
                 w.render(_lines())
-            elif key == 'UP':           cursor = _step(cursor, -1);          _sel_last_click = None; w.render(_lines())
-            elif key == 'DOWN':           cursor = _step(cursor, 1);           _sel_last_click = None; w.render(_lines())
-            elif key == 'HOME':                  cursor = selectable[0];              _sel_last_click = None; w.render(_lines())
-            elif key == 'END':                   cursor = selectable[-1];             _sel_last_click = None; w.render(_lines())
-            elif key == 'PGUP':                  cursor = _nearest_selectable(max(0, cursor - _visible_rows())); _sel_last_click = None; w.render(_lines())
-            elif key == 'PGDN':                  cursor = _nearest_selectable(min(len(items) - 1, cursor + _visible_rows())); _sel_last_click = None; w.render(_lines())
-            elif key == 'SPACE' and multi:
+            elif act == 'list.up':               cursor = _step(cursor, -1);          _sel_last_click = None; w.render(_lines())
+            elif act == 'list.down':             cursor = _step(cursor, 1);           _sel_last_click = None; w.render(_lines())
+            elif act == 'list.top':              cursor = selectable[0];              _sel_last_click = None; w.render(_lines())
+            elif act == 'list.bottom':           cursor = selectable[-1];             _sel_last_click = None; w.render(_lines())
+            elif act == 'list.page_up':          cursor = _nearest_selectable(max(0, cursor - _visible_rows())); _sel_last_click = None; w.render(_lines())
+            elif act == 'list.page_down':        cursor = _nearest_selectable(min(len(items) - 1, cursor + _visible_rows())); _sel_last_click = None; w.render(_lines())
+            elif act == 'list.toggle' and multi:
                 it = items[cursor]
                 if not it.disabled or it.checked:
                     if interlock_category_callback and _locked_category[0] and not it.checked:
@@ -484,7 +730,7 @@ def select(message: str, choices: list, *,
                     _update_interlock()
                     selectable[:] = [i for i, x in enumerate(items) if not x.disabled or x.checked]
                     w.render(_lines())
-            elif key in ('a', 'A') and _toggle_all_ok:
+            elif act == 'list.toggle_all' and _toggle_all_ok:
                 # Toggle every selectable row at once: check all, or clear all if
                 # everything is already checked.
                 targets = [it for it in items if not it.disabled]
@@ -494,17 +740,17 @@ def select(message: str, choices: list, *,
                 selectable[:] = [i for i, x in enumerate(items) if not x.disabled or x.checked]
                 _sel_last_click = None
                 w.render(_lines())
-            elif key in ('ENTER', 'RIGHT'):
+            elif act == 'list.choose':
                 if multi:
                     result = [it.value for it in items if it.checked]; break
                 elif not items[cursor].disabled:
                     result = items[cursor].value; break
-            elif key in ('LEFT', 'b', 'ESC'):
+            elif act == 'list.back':
                 if allow_back:
                     result = None; break
                 # Top-level menu: no back/cancel, only forward or quit.
-            elif key in ('q', 'Q'):              raise QuitToTerminal()
-            elif on_inspect is not None and key == inspect_key and not items[cursor].disabled:
+            elif act == 'list.quit':             raise QuitToTerminal()
+            elif on_inspect is not None and key in inspect_keys and not items[cursor].disabled:
                 # Inspect the current row (e.g. a full detail view) without
                 # ending selection or losing checkbox state. The callback runs
                 # its own full-screen prompt, so re-arm mouse reporting and force
@@ -517,17 +763,33 @@ def select(message: str, choices: list, *,
                 _sel_last_click = None
                 w.anchor_reset()
                 w.render(_lines())
-            elif row_actions and key in row_actions and not items[cursor].disabled:
+            elif list_actions and key in list_actions:
+                _ret = list_actions[key]()
+                if _ret is not None:
+                    result = _ret; break
+                enable_mouse()
+                sys.stdout.flush()
+                w.anchor_reset()
+                w.render(_lines())
+            elif (row_actions and key in row_actions and not items[cursor].disabled
+                  and (row_action_applies is None
+                       or row_action_applies(next((s for s in _row_specs if key in keys.keys_for(s)), key),
+                                             items[cursor].value))):
                 # Act on the highlighted row (e.g. queue this track) and stay in
                 # the list; the callback shows its own status; we just redraw.
                 _ret = row_actions[key](items[cursor].value)
                 if _ret is not None:
                     result = _ret; break
+                # The callback may have opened its own screen (a menu): take the
+                # mouse back and repaint in full, as after on_inspect.
+                enable_mouse()
+                sys.stdout.flush()
                 _sel_last_click = None
+                w.anchor_reset()
                 w.render(_lines())
-            elif (on_move is not None and key in (MOVE_UP_KEY, MOVE_DOWN_KEY)
+            elif (on_move is not None and keys.action(key, "list") in ("list.move_up", "list.move_down")
                   and not items[cursor].disabled):
-                delta = -1 if key == MOVE_UP_KEY else 1
+                delta = -1 if keys.pressed(key, "list.move_up") else 1
                 j = cursor + delta
                 if 0 <= j < len(items) and not items[j].disabled and on_move(items[cursor].value, delta):
                     items[cursor], items[j] = items[j], items[cursor]
@@ -667,10 +929,14 @@ def live_select(message: str, provider: Callable[[str], list], *,
     _row_plain: dict[int, str] = {}
     _fixed_rows = [0]   # header + query + count + above-indicator lines, this frame
 
-    base_hints = {"↑↓": "results", "esc": "back", "↵": "confirm"}
+    base_hints = {L("search.up", "search.down"): "results", L("search.back"): "back",
+                  L("search.choose"): "confirm"}
     if section_nav:
-        base_hints["tab"] = "section"
-    hints = {**(extra_hints or {}), **base_hints}
+        base_hints[L("search.next_section", first=True)] = "section"
+    # Keys given as action ids (backbone.keys), as select() takes them.
+    row_actions = keys.expand(row_actions)
+    cycle_keys = keys.keys_for(cycle_key) if cycle_key is not None else ()
+    hints = {**{keys.hint_for(k): v for k, v in (extra_hints or {}).items()}, **base_hints}
     # Maps an absolute (row, col) on a hint line → the key clicking it replays.
     _hint_cells: dict[tuple[int, int], str] = {}
 
@@ -783,14 +1049,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
         vis = max(2, _visible_rows() - overhead)
 
         n = len(items)
-        if cursor < viewport:
-            viewport = cursor
-        elif cursor >= viewport + vis:
-            viewport = cursor - vis + 1
-        # Growing the window (or deleting rows) leaves the viewport further down
-        # than it needs to be, leaving "N above" with blank space below. Pull it
-        # back so the last row of the list sits on the last visible row at most.
-        viewport = max(0, min(viewport, n - vis))
+        viewport = _scroll(viewport, cursor, vis, items)
         out.append(f"  {C.DIM}╵ {viewport} above{C.RESET}" if viewport > 0 else "")
         _fixed_rows[0] = len(out)   # rows before the first item: the click-math offset
         _row_plain.clear()
@@ -858,28 +1117,32 @@ def live_select(message: str, provider: Callable[[str], list], *,
             if _ch is not None:
                 key = _ch                # replay the hint's key through the switch
 
+            act = keys.action(key, "search")
             if key == 'CTRL_C':
                 raise QuitToTerminal()
-            elif key == 'ESC':
+            elif act == 'search.back':
                 result = None
                 break
             elif row_actions and isinstance(key, str) and key in row_actions and items:
                 row_actions[key](items[cursor].value)
+                enable_mouse()                   # it may have opened its own screen
+                sys.stdout.flush()
+                w.anchor_reset()
                 w.render(_lines())
-            elif key in ('TAB', 'BACKTAB') and section_nav:
-                cursor = _jump_section(-1 if key == 'BACKTAB' else 1)
+            elif act in ('search.next_section', 'search.prev_section') and section_nav:
+                cursor = _jump_section(-1 if act == 'search.prev_section' else 1)
                 w.render(_lines())
-            elif cycle_key is not None and key == cycle_key and on_cycle is not None:
+            elif key in cycle_keys and on_cycle is not None:
                 on_cycle(1)                      # on_cycle(step): step through the scopes
                 _recompute()
                 w.render(_lines())
-            elif key == 'ENTER':
+            elif act == 'search.choose':
                 if items and not items[cursor].disabled:
                     result = items[cursor].value
                     break
-            elif key in ('UP',):
+            elif act == 'search.up':
                 cursor = _step(cursor, -1); _sel_last_click = None; w.render(_lines())
-            elif key in ('DOWN',):
+            elif act == 'search.down':
                 cursor = _step(cursor, 1); _sel_last_click = None; w.render(_lines())
             elif key == 'SCROLL_UP':
                 cursor = _step(cursor, -1); _sel_last_click = None; w.render(_lines())
@@ -916,7 +1179,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
                         _sel_last_click = None
                         cursor = idx
                         w.render(_lines())
-            elif key == 'PGUP':
+            elif act == 'search.page_up':
                 sel = _selectable()
                 if sel:
                     cursor = max(sel[0], cursor - 5)
@@ -924,7 +1187,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
                         cursor = _step(cursor, -1)
                 _sel_last_click = None
                 w.render(_lines())
-            elif key == 'PGDN':
+            elif act == 'search.page_down':
                 sel = _selectable()
                 if sel:
                     cursor = min(sel[-1], cursor + 5)
@@ -969,14 +1232,14 @@ def confirm(message: str, default: bool = False) -> bool:
 
     def _render():
         dflt = "yes" if default else "no"
-        pairs = [("y", "yes"), ("n", "no"), ("↵", f"default ({dflt})"),
-                 ("esc", "back")]
+        pairs = [(L("confirm.yes"), "yes"), (L("confirm.no"), "no"),
+                 (L("confirm.default"), f"default ({dflt})"), (L("confirm.back"), "back")]
         head = [
             f"  {C.DIM}{message}{C.RESET}",
             f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}",
         ]
         lines = list(head)
-        append_chrome(lines, pairs, _hint_cells, i_key=True)
+        append_chrome(lines, pairs, _hint_cells, help_key=True)
         w.render(lines)
 
     try:
@@ -1001,13 +1264,14 @@ def confirm(message: str, default: bool = False) -> bool:
                 if _hk is None:
                     continue             # modal: ignore clicks off the y/n/↵ hints
                 key = _hk                # replay the hint's key
-            if   key == 'CTRL_C':    result = False; break
+            act = keys.action(key, "confirm")
+            if   key == 'CTRL_C':            result = False; break
             # Esc backs out of every other screen, so it must do something here
             # too: cancelling a yes/no question means "no".
-            elif key == 'ESC':       result = False; break
-            elif key == 'ENTER':     result = default; break
-            elif key.lower() == 'y': result = True;  break
-            elif key.lower() == 'n': result = False; break
+            elif act == 'confirm.back':      result = False; break
+            elif act == 'confirm.default':   result = default; break
+            elif act == 'confirm.yes':       result = True;  break
+            elif act == 'confirm.no':        result = False; break
     finally:
         disable_mouse()
         _restore_term_attrs(fd, old)

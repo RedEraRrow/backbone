@@ -9,9 +9,9 @@ from backbone.prompt.core import (
     block_cursor, block_cursor_width, _read_key, _cols, _wrap_bordered_input_lines,
     screen_paint, screen_invalidate, screen_takeover_next,
 )
-from backbone import ui
+from backbone import keys, ui
 from backbone.prompt import chrome
-from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _MODE_TOGGLE_KEY, append_chrome, consume_chrome, disable_mouse, enable_mouse
+from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, append_chrome, consume_chrome, disable_mouse, enable_mouse
 from backbone.prompt.core import C
 from backbone.prompt.core import edit_line
 
@@ -64,7 +64,7 @@ def text(message: str, default: str = "") -> str | None:
 
         pairs = [("↵", "save"), ("esc", "back")]
         if chrome._value_toggle_enabled:
-            pairs.append(("^t", chrome._toggle_hint_label))
+            pairs.append((keys.label("global.raw_text"), chrome._toggle_hint_label))
         append_chrome(out, pairs, _hint_cells)
 
         # One diffed frame (no full erase, no newlines): only the rows that
@@ -98,7 +98,7 @@ def text(message: str, default: str = "") -> str | None:
             if _ch is not None:
                 key = _ch
 
-            if chrome._value_toggle_enabled and key == _MODE_TOGGLE_KEY:
+            if chrome.is_mode_toggle(key):
                 chrome._toggle_carry = "".join(buf)
                 return MODE_TOGGLE  # type: ignore[return-value]
             if   key == 'CTRL_C':             result = None;         break

@@ -4,17 +4,32 @@ from __future__ import annotations
 import sys
 from backbone.prompt.core import (
     _IS_WINDOWS, _hint, add_hint_click_cells, footer_click_action, _hint_pin_target,
-    screen_invalidate, HINTS_CLICK, toggle_hints, place_help_toggle,
+    screen_invalidate, HINTS_CLICK, is_hints_key, toggle_hints, place_help_toggle,
 )
-from backbone import ui
+from backbone import keys, ui
 
+
+# Live on every screen: the background-audio transport (routed through
+# registered callbacks so prompt need not import the playback layer), reopening
+# the player, and the per-edit raw-text toggle.
+keys.define("global", "Everywhere", [
+    ("playpause", ("\x10",), "play / pause"),
+    ("next", ("\x0e",), "next track"),
+    ("prev", ("\x02",), "previous track"),
+    ("player", ("\x0f",), "open the player"),
+    ("raw_text", ("\x14",), "switch a value between its editor and raw text"),
+], within=())
 
 # The one key pair that moves a row up or down, wherever a list's order can be
 # changed (select's on_move, list_edit).
-MOVE_UP_KEY, MOVE_DOWN_KEY = 'J', 'K'
+keys.define("list", "Lists", [
+    ("move_up", ("J",), "move the row up"),
+    ("move_down", ("K",), "move the row down"),
+])
 
 
-MOVE_HINT = (f"{MOVE_UP_KEY}/{MOVE_DOWN_KEY}", "move up/down")
+def move_hint() -> tuple:
+    return (keys.label("list.move_up", "list.move_down"), "move up/down")
 
 
 # Per-edit "raw text ↔ smart widget" toggle. prompt_for_value enables the
@@ -28,13 +43,14 @@ def _with_toggle_hint(pairs, label: str = 'raw text'):
     toggle is live.
 
     Every widget that *accepts* ^t advertises it through this, so the key is never
-    silently available on one screen and absent from the bar on another. "^t"
-    renders as a clickable hint key too (it synthesises the real control char).
+    silently available on one screen and absent from the bar on another.
     """
-    return list(pairs) + [("^t", label)] if _value_toggle_enabled else list(pairs)
+    return list(pairs) + [(keys.label("global.raw_text"), label)] if _value_toggle_enabled else list(pairs)
 
 
-_MODE_TOGGLE_KEY = '\x14'          # Ctrl-T
+def is_mode_toggle(key: str) -> bool:
+    """Whether `key` asks a value editor to switch to raw text (or back)."""
+    return _value_toggle_enabled and keys.pressed(key, "global.raw_text")
 
 
 _value_toggle_enabled = False
@@ -44,21 +60,6 @@ _toggle_hint_label = 'widget'      # what text()'s ^t hint calls the alternate m
 
 
 _toggle_carry: str | None = None   # in-progress text buffer handed across a Ctrl-T toggle
-
-
-# Global playback hotkeys, live from any list/menu while background audio plays.
-# Ctrl-O reopens the full player; Ctrl-P/N/B are transport. Routed through
-# registered callbacks so prompt need not import the playback layer.
-_PLAYER_KEY    = '\x0f'            # Ctrl-O: open the full player view
-
-
-_PLAYPAUSE_KEY = '\x10'           # Ctrl-P: play / pause
-
-
-_NEXT_KEY      = '\x0e'           # Ctrl-N: next track
-
-
-_PREV_KEY      = '\x02'           # Ctrl-B: previous track
 
 
 _player_opener = None
@@ -95,9 +96,10 @@ def chrome_hint_pairs(pairs) -> list:
     items = list(pairs.items()) if isinstance(pairs, dict) else [tuple(p) for p in pairs]
     if ui.footer_active() or ui.footer_unboxed():
         if _transport_handler is not None:
-            items += [("^p", "play/pause"), ("^n/^b", "next/prev")]
+            items += [(keys.label("global.playpause"), "play/pause"),
+                      (keys.label("global.next", "global.prev"), "next/prev")]
         if _player_opener is not None:
-            items += [("^o", "player")]
+            items += [(keys.label("global.player"), "player")]
     return items
 
 
@@ -108,7 +110,7 @@ def chrome_hint_lines(pairs, *, extra: str = "") -> list:
 
 
 def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
-                  pin: bool = True, i_key: bool = False) -> list:
+                  pin: bool = True, help_key: bool = False) -> list:
     """Append the hint bar to a widget's rendered `out` lines, in place.
 
     Pads down to :func:`_hint_pin_target` so the bar sits just above the
@@ -118,8 +120,8 @@ def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
     :func:`consume_chrome` to look up.
 
     The bar is empty unless hints are switched on; either way the top line
-    (`out[0]`) carries the corner toggle. `i_key`: this screen leaves `i` free,
-    so `i` toggles too and the corner says so.
+    (`out[0]`) carries the corner toggle. `help_key`: this screen leaves `?` free,
+    so `?` toggles and the corner says so; otherwise it names Ctrl-/.
     """
     items = chrome_hint_pairs(pairs)
     hint_lines = _hint(*items, extra=extra).splitlines()
@@ -136,7 +138,7 @@ def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
             # `_Widget.render` lays line j at terminal row anchor(1) + MARGIN_V + j.
             add_hint_click_cells(cells, out[start + k],
                                  1 + ui.MARGIN_V + (start + k), items)
-    place_help_toggle(out, 1 + ui.MARGIN_V, cells, i_key)
+    place_help_toggle(out, 1 + ui.MARGIN_V, cells, help_key)
     return out
 
 
@@ -153,23 +155,18 @@ def consume_chrome(key: str, cells: dict):
         # background track change went by), so repaint everything.
         screen_invalidate()
         return CHROME_REDRAW
-    if key == HINTS_CLICK or (key == 'i' and cells.get('__i_key__')):
+    if is_hints_key(key, bool(cells.get('__help_key__'))):
         toggle_hints()
         return CHROME_REDRAW            # the bar appeared or went: re-lay the screen
-    if key == _PLAYER_KEY and _player_opener is not None:
+    act = keys.action(key, "global") if isinstance(key, str) else None
+    if act == "global.player" and _player_opener is not None:
         _player_opener()
         if not _IS_WINDOWS:
             sys.stdout.write("\033[?1000h\033[?1006h")   # the player took the mouse
         sys.stdout.flush()
         return CHROME_REDRAW
-    if key == _PLAYPAUSE_KEY and _transport_handler is not None:
-        _transport_handler('playpause')
-        return CHROME_HANDLED
-    if key == _NEXT_KEY and _transport_handler is not None:
-        _transport_handler('next')
-        return CHROME_HANDLED
-    if key == _PREV_KEY and _transport_handler is not None:
-        _transport_handler('prev')
+    if act in ("global.playpause", "global.next", "global.prev") and _transport_handler is not None:
+        _transport_handler(act.split(".")[1])
         return CHROME_HANDLED
 
     if isinstance(key, str) and key.startswith('MOUSE_CLICK:'):
@@ -190,7 +187,8 @@ def consume_chrome(key: str, cells: dict):
             _transport_handler(act)
             return CHROME_HANDLED
         hit = cells.get((row, col))
-        if hit in (_PLAYER_KEY, _PLAYPAUSE_KEY, _NEXT_KEY, _PREV_KEY, HINTS_CLICK):
+        if hit == HINTS_CLICK or keys.action(hit or "", "global") in (
+                "global.player", "global.playpause", "global.next", "global.prev"):
             return consume_chrome(hit, cells)   # a transport hint: act on it here
         if hit is not None:
             return hit                      # replay the clicked hint's key

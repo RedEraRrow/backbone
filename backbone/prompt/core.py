@@ -9,7 +9,7 @@ import time
 import select as _sel
 from typing import Any
 
-from backbone import ui
+from backbone import keys, ui
 from backbone.log import log, enabled as _logging, quietly
 C = ui.Colors
 
@@ -359,11 +359,18 @@ def _cols() -> int:
 
 
 # --- Hint bar visibility ------------------------------------------------------
-# One switch for every screen's hint bar, off until turned on (`i`, or a click on
-# the corner toggle each screen shows on its top line), remembered between runs.
+# One switch for every screen's hint bar, off until turned on (`?`, Ctrl-/ where
+# `?` is typed, or a click on the corner toggle each screen shows on its top
+# line), remembered between runs.
 # Kept in its own small file rather than config.json: screens hold a loaded
 # config and save it back later, which would quietly undo a toggle made meanwhile.
 HINTS_CLICK = '\x00hints'     # the key a click on the corner toggle replays
+keys.define("global", "Everywhere", [
+    # Wherever it isn't typed or bound; Ctrl-/ (the same key with Ctrl) is the
+    # way where it is, and works everywhere.
+    ("help", ("?",), "show or hide the key hints"),
+    ("help_typed", ("\x1f",), "show or hide the key hints, in a text field too"),
+], within=())
 _hints_on: list = [None]      # None until first read
 
 
@@ -396,26 +403,47 @@ def toggle_hints() -> None:
         pass
 
 
-def help_corner_text() -> tuple[str, int]:
-    """The header toggle, styled, and its width: `[i] help` / `[i] hide help`."""
-    label = "hide help" if hints_visible() else "help"
-    return (f"{C.RESET}{C.DIM}[{C.RESET}{C.BOLD}i{C.RESET}{C.DIM}] {label}{C.RESET}",
-            4 + len(label))
+def is_hints_key(key: str, key_free: bool) -> bool:
+    """Whether `key` toggles the hints: a click on the corner, Ctrl-/, or `?`
+    where the screen leaves `?` free (not typed or bound)."""
+    return (key == HINTS_CLICK or keys.pressed(key, "global.help_typed")
+            or (key_free and keys.pressed(key, "global.help")))
 
 
-def add_help_corner(line: str, row: int, cells: dict, i_key: bool = False) -> str:
+def help_corner_text(help_key: bool = True, shown: bool | None = None) -> tuple[str, int]:
+    """The header toggle, styled, and its width: `[?] help` / `[?] hide help`,
+    or `[^/] …` where `?` is typed (a text field) and Ctrl-/ is the key.
+    `shown`: the hints' state to describe (default: as they are now)."""
+    key = keys.label("global.help" if help_key else "global.help_typed", first=True) or " "
+    label = "hide help" if (hints_visible() if shown is None else shown) else "help"
+    return (f"{C.RESET}{C.DIM}[{C.RESET}{C.BOLD}{key}{C.RESET}{C.DIM}] {label}{C.RESET}",
+            3 + len(key) + len(label))
+
+
+def _toggle_variants() -> list[tuple[str, int]]:
+    """Every form the toggle can take: either key, either state."""
+    return [help_corner_text(k, shown) for k in (True, False) for shown in (True, False)]
+
+
+def help_toggle_width() -> int:
+    """The room a header keeps for the toggle: its widest form, so swapping in
+    another (the hints switched, or the key that works here) never moves the row."""
+    return max(w for _t, w in _toggle_variants())
+
+
+def add_help_corner(line: str, row: int, cells: dict, help_key: bool = False) -> str:
     """`line` (a screen's top line, drawn on screen row `row`) with the toggle
-    right-aligned on it, clipping the line if the two would meet. Only the `i`
-    is clickable (a click replays HINTS_CLICK). `i_key`: pressing `i` toggles
-    here too; elsewhere `i` is typed or bound, and the click is the way."""
-    text, width = help_corner_text()
+    right-aligned on it, clipping the line if the two would meet. Only the key
+    is clickable (a click replays HINTS_CLICK). `help_key`: pressing `?` toggles
+    here; elsewhere `?` is typed or bound, and the toggle names Ctrl-/."""
+    text, width = help_corner_text(help_key)
     col = max(1, ui.get_terminal_width() - ui.MARGIN_H - width + 1)
     room = col - 2                                   # keep one blank column before it
     body = line if ui.visual_len(ui.strip_ansi(line)) <= room else _clip_ansi(line, room)
     pad = max(1, col - 1 - ui.visual_len(ui.strip_ansi(body)))
-    cells[(row, col + 1)] = HINTS_CLICK              # the `i` of "[i]"
-    if i_key:
-        cells['__i_key__'] = True                    # consume_chrome: `i` toggles here
+    cells[(row, col + 1)] = HINTS_CLICK              # the key inside "[…]"
+    if help_key:
+        cells['__help_key__'] = True                 # consume_chrome: `?` toggles here
     return f"{body}{C.RESET}{' ' * pad}{text}"
 
 
@@ -429,7 +457,11 @@ def rounded_header(title: str, detail: str = "", right: str = "",
     vl = ui.visual_len
     mh = ui.MARGIN_H
     inner = max(12, ui.get_terminal_width() - 2 * mh - 4)
+    # Room for the toggle's widest form, so place_help_toggle can swap in the
+    # one that fits now without the row growing (see help_toggle_width).
     toggle, tw = help_corner_text()
+    wide = help_toggle_width()
+    toggle, tw = " " * (wide - tw) + toggle, wide
 
     def _fit(text: str, n: int) -> str:
         return text if vl(text) <= n else (text[:max(0, n - 1)] + "…" if n > 1 else "")
@@ -453,20 +485,28 @@ def rounded_header(title: str, detail: str = "", right: str = "",
     return lines
 
 
-def place_help_toggle(out: list, first_row: int, cells: dict, i_key: bool = False) -> None:
+def place_help_toggle(out: list, first_row: int, cells: dict, help_key: bool = False) -> None:
     """Make the hints toggle on a screen clickable: a header that already
-    carries it (rounded_header) gets its `i` registered where it is; otherwise
-    it is added to the top line, `out[0]`. `out[k]` is drawn on row first_row + k."""
+    carries it (rounded_header) gets it brought up to date where it is (the
+    hints may have been switched since the header was built, and it says
+    Ctrl-/ when `?` isn't free); otherwise it is added to the top line,
+    `out[0]`. `out[k]` is drawn on row first_row + k."""
+    wide = help_toggle_width()
+    now, now_w = help_corner_text(help_key)
     for k, line in enumerate(out[:4]):
+        was = next((" " * (wide - w) + t for t, w in _toggle_variants() if " " * (wide - w) + t in line), None)
+        if was is None:
+            continue
+        line = out[k] = line.replace(was, " " * (wide - now_w) + now, 1)
         plain = ui.strip_ansi(line)
-        at = plain.find("[i] ")
-        if at >= 0 and plain[at + 4:].startswith(("help", "hide help")):
+        at = plain.find(ui.strip_ansi(help_corner_text(help_key)[0]))
+        if at >= 0:
             cells[(first_row + k, ui.visual_len(plain[:at]) + 2)] = HINTS_CLICK
-            if i_key:
-                cells['__i_key__'] = True
+            if help_key:
+                cells['__help_key__'] = True
             return
     if out:
-        out[0] = add_help_corner(out[0], first_row, cells, i_key)
+        out[0] = add_help_corner(out[0], first_row, cells, help_key)
 
 
 def _hint(*pairs, extra="", always: bool = False) -> str:
@@ -481,9 +521,12 @@ def _hint(*pairs, extra="", always: bool = False) -> str:
 
     cols = _cols()
 
-    # Parse items into structured tuples: (key, value, raw_string_for_math)
+    # Parse items into structured tuples: (key, value, raw_string_for_math).
+    # An action left without a key has nothing to show.
     parsed_items = []
     for k, v in pairs:
+        if isinstance(k, keys.HintKey) and not k:
+            continue
         parsed_items.append((k, v, f"[{k}] {v}"))
 
     if extra:
@@ -629,6 +672,8 @@ def _hint_key_tokens(key: str) -> list[tuple[int, int, str]]:
     """Split a hint key label into clickable ``(offset, glyph_len, synth_key)``
     buttons. ``offset`` is 0-based within the key text; the '/' joiners it skips
     over are left non-clickable."""
+    if isinstance(key, keys.HintKey):              # built from the keymap: it knows
+        return list(key.tokens)                    # the real key behind each glyph
     segs = key.split('/') if (key and key != '/' and '/' in key) else [key]
     tokens: list[tuple[int, int, str]] = []
     off = 0
@@ -1425,10 +1470,11 @@ _register_screen_hooks()
 hint = _hint   # the public name for the hint bar
 
 
-def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=None,
+def run_dashboard(render, interval: float = 1.0, quit_action: str = "list.quit", on_quit=None,
                   poll: float = 0.05, on_key=None) -> None:
     """Runs a live, tick-driven view through a _Widget, so it resizes and
-    paints like every other widget here. Returns when `quit_key` is pressed.
+    paints like every other widget here. Returns when a key of the
+    `quit_action` binding (see backbone.keys) is pressed.
 
     `render()` takes no arguments and returns the whole frame as a list of
     lines, each carrying its own left-margin indent (see header_box()). It
@@ -1444,7 +1490,7 @@ def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=No
     too?" confirm().
 
     When stdin is not a terminal, keys can't be read: it renders on a plain
-    time.sleep(interval) loop and never checks for `quit_key`, so the
+    time.sleep(interval) loop and never checks for the quit key, so the
     caller has to be stopped from outside.
     """
     fd = sys.stdin.fileno()
@@ -1469,7 +1515,7 @@ def run_dashboard(render, interval: float = 1.0, quit_key: str = "q", on_quit=No
             if is_tty:
                 if _wait_for_keypress(poll):
                     key = _read_key(fd)
-                    if key == quit_key:
+                    if keys.pressed(key, quit_action):
                         break
                     if on_key is not None:
                         on_key(key)

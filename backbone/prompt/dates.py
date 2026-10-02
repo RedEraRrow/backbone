@@ -8,13 +8,25 @@ from backbone.prompt.core import (
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, block_cursor,
     _read_key, _Widget, screen_takeover_next,
 )
-from backbone import ui
+from backbone import keys, ui
 from backbone import datetime_parse as dtp
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
-from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _MODE_TOGGLE_KEY, _with_toggle_hint, append_chrome, consume_chrome, disable_mouse, enable_mouse
+from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _with_toggle_hint, append_chrome, consume_chrome, disable_mouse, enable_mouse
 from backbone.prompt.text import text
 from backbone.prompt.core import C
+
+
+keys.define("calendar", "Calendar", [
+    ("later", ("RIGHT",), "next month, or day"),
+    ("earlier", ("LEFT",), "previous month, or day"),
+    ("up", ("UP",), "previous year, or week"),
+    ("down", ("DOWN",), "next year, or week"),
+    ("switch", ("TAB", "BACKTAB"), "switch between months and days"),
+    ("manual", ("m",), "type a date"),
+    ("save", ("ENTER",), "save"),
+    ("back", ("ESC",), "back"),
+], within=("list", "global"))
 
 
 def _is_leap_year(year: int) -> bool:
@@ -116,14 +128,12 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
 
         lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
-        if not day_mode:
-            _cal_pairs = [("↵", "save"), ("esc", "back"), ("q", "quit app"),
-                          ("tab", "month/day"), ("←→", "month"),
-                          ("↑↓", "year"), ("m", "manual entry")]
-        else:
-            _cal_pairs = [("↵", "save"), ("esc", "back"), ("q", "quit app"),
-                          ("tab", "month/day"), ("←→", "±1 day"),
-                          ("↑↓", "±7 days"), ("m", "manual entry")]
+        L = keys.label
+        _cal_pairs = [(L("calendar.save"), "save"), (L("calendar.back"), "back"),
+                      (L("list.quit"), "quit app"), (L("calendar.switch", first=True), "month/day"),
+                      (L("calendar.earlier", "calendar.later"), "±1 day" if day_mode else "month"),
+                      (L("calendar.up", "calendar.down"), "±7 days" if day_mode else "year"),
+                      (L("calendar.manual"), "manual entry")]
 
         append_chrome(lines, _with_toggle_hint(_cal_pairs), _hint_cells)
         w.render(lines)
@@ -156,20 +166,21 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
             if _ch is not None:
                 key = _ch
 
-            if chrome._value_toggle_enabled and key == _MODE_TOGGLE_KEY:
+            if chrome.is_mode_toggle(key):
                 return MODE_TOGGLE  # type: ignore[return-value]
-            if key == 'ENTER':
+            act = keys.action(key, "calendar")
+            if act == 'calendar.save':
                 result = f"{y:04d}-{m:02d}-{cursor_day:02d}"
                 break
-            elif key in ('ESC', 'CTRL_C'):      # Ctrl-C cancels, as in every widget
+            elif key == 'CTRL_C' or act == 'calendar.back':   # Ctrl-C cancels, as in every widget
                 break
-            elif key in ('q', 'Q'):
+            elif act == 'list.quit':
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
 
-            elif key in ('TAB', 'BACKTAB'):
+            elif act == 'calendar.switch':
                 day_mode = not day_mode      # two modes: reverse is the same flip
 
-            elif key == 'RIGHT':
+            elif act == 'calendar.later':
                 if not day_mode:
                     m += 1
                     if m > 12:
@@ -185,7 +196,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
                             y += 1
                         cursor_day = 1
 
-            elif key == 'LEFT':
+            elif act == 'calendar.earlier':
                 if not day_mode:
                     m -= 1
                     if m < 1:
@@ -201,7 +212,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
                             y -= 1
                         cursor_day = _days_in_month(y, m)
 
-            elif key == 'UP':
+            elif act == 'calendar.up':
                 if not day_mode:
                     y -= 1
                     cursor_day = min(cursor_day, _days_in_month(y, m))
@@ -215,7 +226,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
                         # Wraps into the last day of the previous month
                         cursor_day = _days_in_month(y, m)
 
-            elif key == 'DOWN':
+            elif act == 'calendar.down':
                 if not day_mode:
                     y += 1
                     cursor_day = min(cursor_day, _days_in_month(y, m))
@@ -229,7 +240,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
                         # Wraps into the first day of the next month
                         cursor_day = 1
 
-            elif key == 'm':
+            elif act == 'calendar.manual':
                 w.clear()
                 manual = text("Enter date (YYYY-MM-DD):", default=f"{y:04d}-{m:02d}-{cursor_day:02d}")
                 if manual:
@@ -368,13 +379,13 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
         if section == 'date':
             if not day_mode:
                 h = [("←→", "month"), ("↑↓", "year"), ("tab/⇧tab", "field"),
-                     ("↵", "save"), ("esc", "back"), ("q", "quit app")]
+                     ("↵", "save"), ("esc", "back"), (keys.label("list.quit"), "quit app")]
             else:
                 h = [("←→↑↓", "navigate"), ("tab/⇧tab", "field"), ("↵", "save"),
-                     ("esc", "back"), ("q", "quit app")]
+                     ("esc", "back"), (keys.label("list.quit"), "quit app")]
         elif section == 'time':
             h = [("←→", "cursor"), ("tab/⇧tab", "field"), ("↵", "save"),
-                 ("esc", "back"), ("q", "quit app")]
+                 ("esc", "back"), (keys.label("list.quit"), "quit app")]
 
         append_chrome(lines, _with_toggle_hint(h), _hint_cells)
         w.render(lines)
@@ -421,11 +432,11 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
             if _ch is not None:
                 key = _ch
 
-            if chrome._value_toggle_enabled and key == _MODE_TOGGLE_KEY:
+            if chrome.is_mode_toggle(key):
                 return MODE_TOGGLE  # type: ignore[return-value]
             if key in ('ESC', 'CTRL_C'):
                 break
-            if key in ('q', 'Q'):
+            if keys.pressed(key, 'list.quit'):
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
 
             if key == 'ENTER':

@@ -10,7 +10,7 @@ from backbone.prompt.core import (
     _set_raw, _restore_term_attrs, _get_term_attrs,
     _visible_rows, _cols, C,
 )
-from backbone import ui
+from backbone import keys, ui
 from backbone.nav import QuitToTerminal
 
 _TIMEZONES = [
@@ -833,6 +833,16 @@ _WORLD_MAP_DATA = (
 _WORLD_BITMAP: list[list[int]] | None = None
 
 
+keys.define("timezone", "Time zone picker", [
+    ("earlier", ("LEFT",), "previous UTC offset"),
+    ("later", ("RIGHT",), "next UTC offset"),
+    ("up", ("UP",), "previous zone"),
+    ("down", ("DOWN",), "next zone"),
+    ("choose", ("ENTER",), "choose"),
+    ("back", ("ESC",), "clear the search, or cancel"),
+], within=("search", "global"))
+
+
 def _get_world_bitmap() -> list[list[int]]:
     """Decode and cache the 2880x1440 world coastline bitmap (built lazily, once)."""
     global _WORLD_BITMAP
@@ -1400,8 +1410,9 @@ def timezone_select(initial_offset: str = "") -> str | None:
 
         # Hint bar, via the shared chrome, so it carries the transport keys
         # while background audio is playing and its keys are clickable.
-        _tz_pairs = [("←→", "offset"), ("↑↓", "zone"),
-                     ("↵", "confirm"), ("esc", "cancel/clear")]
+        L = keys.label
+        _tz_pairs = [(L("timezone.earlier", "timezone.later"), "offset"), (L("timezone.up", "timezone.down"), "zone"),
+                     (L("timezone.choose"), "confirm"), (L("timezone.back"), "cancel/clear")]
         hint_line_count = len(_prompt.chrome_hint_lines(_tz_pairs))
 
         # Map fills remaining rows; search line is always 1 slot (blank when empty)
@@ -1446,10 +1457,11 @@ def timezone_select(initial_offset: str = "") -> str | None:
             if _ch is not None:
                 key = _ch
 
-            if key in ('CTRL_C',):
+            act = keys.action(key, "timezone")
+            if key == 'CTRL_C':
                 break
 
-            if key == 'ESC':
+            if act == 'timezone.back':
                 if search_str:
                     search_str = ""
                     _render()
@@ -1461,12 +1473,12 @@ def timezone_select(initial_offset: str = "") -> str | None:
                     search_str = search_str[:-1]
                     _render()
 
-            elif key == 'ENTER':
+            elif act == 'timezone.choose':
                 oh, om = cur_offset
                 result = _offset_str(oh, om)
                 break
 
-            elif key == 'RIGHT':
+            elif act == 'timezone.later':
                 off_idx = (off_idx + 1) % len(unique_offsets)
                 cur_offset = unique_offsets[off_idx]
                 tz_idx_in_offset = 0
@@ -1474,7 +1486,7 @@ def timezone_select(initial_offset: str = "") -> str | None:
                 search_str = ""
                 _render()
 
-            elif key == 'LEFT':
+            elif act == 'timezone.earlier':
                 off_idx = (off_idx - 1) % len(unique_offsets)
                 cur_offset = unique_offsets[off_idx]
                 tz_idx_in_offset = 0
@@ -1482,13 +1494,13 @@ def timezone_select(initial_offset: str = "") -> str | None:
                 search_str = ""
                 _render()
 
-            elif key == 'DOWN':
+            elif act == 'timezone.down':
                 tzs = _tzs_for_offset(*cur_offset)
                 if tzs:
                     tz_idx_in_offset = (tz_idx_in_offset + 1) % len(tzs)
                 _render()
 
-            elif key == 'UP':
+            elif act == 'timezone.up':
                 tzs = _tzs_for_offset(*cur_offset)
                 if tzs:
                     tz_idx_in_offset = (tz_idx_in_offset - 1) % len(tzs)

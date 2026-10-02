@@ -8,12 +8,12 @@ from backbone.prompt.core import (
     block_cursor_width, _read_key, _visible_rows, _cols, _Widget, add_hint_click_cells,
     footer_click_action, _hint_pin_target, screen_takeover_next, add_help_corner,
 )
-from backbone import ui
+from backbone import keys, ui
 from backbone import datetime_parse as dtp
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import (
-    CHROME_HANDLED, chrome_hint_pairs, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, MODE_TOGGLE, _MODE_TOGGLE_KEY, MOVE_DOWN_KEY, MOVE_HINT, MOVE_UP_KEY,
+    CHROME_HANDLED, chrome_hint_pairs, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, MODE_TOGGLE, move_hint,
 )
 from backbone.prompt.lists import confirm
 from backbone.prompt.text import path, system_editor_edit
@@ -38,6 +38,17 @@ _TS_SLOTS = tuple(i for i, ch in enumerate(_TS_MASK) if ch.isalpha())
 
 # Where each part starts, as an index into _TS_SLOTS: Y, M, D, h, m, s.
 _TS_PARTS = ((0, 4), (4, 6), (6, 8), (8, 10), (10, 12), (12, 14))
+
+
+# The table editor's own keys; moving, saving (choose), back and quit are the
+# shared list keys.
+keys.define("table", "Table editors", [
+    ("add", ("a",), "add a row"),
+    ("edit", ("e",), "edit the row"),
+    ("delete", ("d", "BACKSPACE", "DELETE"), "delete the row"),
+    ("import_text", ("i",), "import rows typed in an editor"),
+    ("import_file", ("f",), "import rows from a file"),
+], within=("list", "global"))
 
 
 def _ts_write(buf: list, start_slot: int, digits: str) -> None:
@@ -228,13 +239,17 @@ def _build_list_edit_lines(
     inner = c
     out = []
 
+    L = keys.label
+    _imports = {L("table.import_text"): "import text", L("table.import_file"): "from file"}
+    _end = {L("list.back", most=1): "back", L("list.choose", most=1): "save", L("list.quit"): "quit app"}
     if fixed_rows:
-        base_hints = {"↑↓": "move", "e": "edit", "i": "import text", "f": "from file", "esc": "back", "↵": "save", "q": "quit app"}
+        base_hints = {L("list.up", "list.down"): "move", L("table.edit"): "edit", **_imports, **_end}
     else:
-        base_hints = {"↑↓": "move", "a": "add", "e": "edit", "d": "delete", MOVE_HINT[0]: MOVE_HINT[1], "i": "import text", "f": "from file", "esc": "back", "↵": "save", "q": "quit app"}
+        base_hints = {L("list.up", "list.down"): "move", L("table.add"): "add", L("table.edit"): "edit",
+                      L("table.delete", most=1): "delete", move_hint()[0]: move_hint()[1], **_imports, **_end}
     # Both variants answer ^t (see list_edit's key loop), so both advertise it.
     if chrome._value_toggle_enabled:
-        base_hints["^t"] = "raw text"
+        base_hints[keys.label("global.raw_text")] = "raw text"
     edit_hints = {"tab/⇧tab": "column", "esc": "back", "↵": "save"}
 
     out.append(f"  {C.DIM}{message}{C.RESET}")
@@ -548,8 +563,8 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
             for _k in range(n_hint):
                 add_hint_click_cells(_hint_cells, lines[_start + _k],
                                      1 + ui.MARGIN_V + (_start + _k), _hp)
-        if lines:               # `i` imports text here, so the corner is click-only
-            lines[0] = add_help_corner(lines[0], 1 + ui.MARGIN_V, _hint_cells)
+        if lines:               # `?` is typed while a cell is being edited
+            lines[0] = add_help_corner(lines[0], 1 + ui.MARGIN_V, _hint_cells, help_key=not edit_mode)
         w.render(lines)
 
     def _commit_edit_buffer():
@@ -595,7 +610,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                 key = _ch
 
             # After the replay, so a clicked ^t toggles as the typed one does.
-            if chrome._value_toggle_enabled and key == _MODE_TOGGLE_KEY and not edit_mode:
+            if chrome.is_mode_toggle(key) and not edit_mode:
                 return MODE_TOGGLE  # type: ignore[return-value]
 
             if edit_mode and barrel_mode:
@@ -799,6 +814,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                     if _hk is not None:
                         key = _hk        # replay the hint's key through the switch
 
+                act = keys.action(key, "table")
                 if key == 'CTRL_C':
                     break
                 elif key == 'SCROLL_UP':
@@ -827,16 +843,16 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                                     _le_last_click = _clicked_idx
                                     cursor = _clicked_idx
                                     _render()
-                elif key == 'UP':
+                elif act == 'list.up':
                     if items: cursor = (cursor - 1) % len(items)
                     _le_last_click = None
                     _render()
-                elif key == 'DOWN':
+                elif act == 'list.down':
                     if items: cursor = (cursor + 1) % len(items)
                     _le_last_click = None
                     _render()
 
-                elif key == 'a' and not fixed_rows:
+                elif act == 'table.add' and not fixed_rows:
                     empty_item = tuple(["" for _ in range(num_cols)]) if num_cols > 1 else ""
                     items.append(empty_item)
                     cursor = len(items) - 1
@@ -848,7 +864,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                     edit_backup = empty_item
                     _render()
 
-                elif key == 'e' and items:
+                elif act == 'table.edit' and items:
                     edit_mode = True
                     # Start on the first non-locked column.
                     edit_col = 0
@@ -878,7 +894,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                         barrel_idx = 0
                     _render()
 
-                elif key in ('d', 'BACKSPACE', 'DELETE') and items and not fixed_rows:
+                elif act == 'table.delete' and items and not fixed_rows:
                     items.pop(cursor)
                     if items:
                         cursor = min(cursor, len(items) - 1)
@@ -886,24 +902,24 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                         cursor = 0
                     _render()
 
-                elif key == MOVE_UP_KEY and items and not fixed_rows and cursor > 0:
+                elif keys.pressed(key, "list.move_up") and items and not fixed_rows and cursor > 0:
                     items[cursor - 1], items[cursor] = items[cursor], items[cursor - 1]
                     cursor -= 1
                     _le_last_click = None
                     _render()
 
-                elif key == MOVE_DOWN_KEY and items and not fixed_rows and cursor < len(items) - 1:
+                elif keys.pressed(key, "list.move_down") and items and not fixed_rows and cursor < len(items) - 1:
                     items[cursor + 1], items[cursor] = items[cursor], items[cursor + 1]
                     cursor += 1
                     _le_last_click = None
                     _render()
 
-                elif key == 'ENTER':
+                elif act == 'list.choose':
                     result = items
                     break
 
-                elif key in ('i', 'f'):
-                    if key == 'i':
+                elif act in ('table.import_text', 'table.import_file'):
+                    if act == 'table.import_text':
                         if num_cols > 1:
                             template = (
                                 "# One entry per line: "
@@ -941,10 +957,10 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                         cursor = len(items) - 1 if items else 0
                     _render()
 
-                elif key in ('q', 'Q'):
+                elif act == 'list.quit':
                     raise QuitToTerminal()   # q quits the app; never a way out of a widget
 
-                elif key == 'ESC':
+                elif act == 'list.back':
                     ui.clear_screen()
                     # "Discard changes?" → yes = drop edits (original), no = keep edits.
                     result = initial_items if confirm("Discard changes?", default=False) else items

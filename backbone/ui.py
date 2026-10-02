@@ -31,13 +31,15 @@ _size_cache_at: float = 0.0
 _SIZE_TTL = 0.25
 
 _last_resize_signal = 0.0               # monotonic time of the last SIGWINCH
+_cell_aspect_cache: float | None = None # see cell_aspect(); a resize clears it
 
 
 def _sigwinch_handler(signum: int, frame: Any) -> None:
     """Mark that the terminal was resized; consume_resize() picks this up."""
-    global _resize_flag, _size_cache, _last_resize_signal
+    global _resize_flag, _size_cache, _cell_aspect_cache, _last_resize_signal
     _resize_flag = True
     _size_cache = None                   # the memoised size is now wrong
+    _cell_aspect_cache = None            # and so may the cell size be (a font change)
     _last_resize_signal = _time.monotonic()
 
 
@@ -484,6 +486,18 @@ def get_status_line() -> str:
         status = clip_ansi(status, cols)
     return status
 
+def _tty_size() -> os.terminal_size:
+    """Ask the terminal itself. shutil.get_terminal_size() prefers exported
+    COLUMNS/LINES, which some shells and terminals export once at startup,
+    and that froze the size for good. Those only count when no stream is a tty."""
+    for stream in (sys.__stdout__, sys.__stdin__, sys.__stderr__):
+        try:
+            return os.get_terminal_size(stream.fileno())
+        except (AttributeError, ValueError, OSError):
+            continue
+    return shutil.get_terminal_size()
+
+
 def get_terminal_size(default: tuple = (80, 24)) -> tuple:
     """Terminal (columns, rows), falling back to `default` if the query fails.
 
@@ -494,13 +508,38 @@ def get_terminal_size(default: tuple = (80, 24)) -> tuple:
         if _HAS_SIGWINCH or (_time.monotonic() - _size_cache_at) < _SIZE_TTL:
             return _size_cache
     try:
-        size = shutil.get_terminal_size()
+        size = _tty_size()
     except OSError:
         return default
     _size_cache = (size.columns, size.lines)
     _size_cache_at = _time.monotonic()
     return _size_cache
 
+
+
+def cell_aspect(default: float = 2.0) -> float:
+    """How many times taller than wide one character cell is on screen, from
+    the pixel size the terminal reports. Anything drawn in cells (half-block
+    art, an inline image's box) needs it to keep an image's proportions;
+    `default` when the terminal doesn't report pixels. Re-read after a resize,
+    which is also what a font change sends."""
+    global _cell_aspect_cache
+    if _cell_aspect_cache is None:
+        _cell_aspect_cache = default
+        try:
+            import fcntl, struct, termios
+            for stream in (sys.__stdout__, sys.__stdin__, sys.__stderr__):
+                try:
+                    r, c, xpx, ypx = struct.unpack(
+                        "HHHH", fcntl.ioctl(stream.fileno(), termios.TIOCGWINSZ, b"\0" * 8))
+                except (AttributeError, ValueError, OSError):
+                    continue
+                if r and c and xpx and ypx:
+                    _cell_aspect_cache = (ypx / r) / (xpx / c)
+                break
+        except ImportError:                          # Windows: no ioctl
+            pass
+    return _cell_aspect_cache
 
 
 def get_terminal_width(default: int = 80) -> int:
