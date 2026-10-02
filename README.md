@@ -14,13 +14,20 @@ else imports it.
 
 ## Install
 
-Not on PyPI. backtrack and backcrack each name it by its GitHub URL, so
-installing either one pulls it in. To work on it, install this checkout
-editable first, so edits here take effect immediately with no reinstall:
+On PyPI as `backpack-backbone` (the import name is still `backbone`).
+backtrack and backcrack depend on it, so installing either one pulls it in;
+there's no reason to install it on its own unless you're building a tool.
+
+To work on it, install this checkout editable before the tools, so edits here
+take effect immediately with no reinstall:
 
     pip3 install -e .
 
 pip then sees the requirement already satisfied and leaves it.
+
+`backbone.deps` is how a tool says what it needs besides Python: each tool's
+`doctor` command reports it, and `deps.require` stops a tool at startup with
+how to install anything it can't run without.
 
 ## What's in it
 

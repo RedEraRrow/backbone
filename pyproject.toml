@@ -3,13 +3,25 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "backbone"
-version = "0.1.0"
+name = "backpack-backbone"
+version = "0.2.0"
 description = "Shared code for the back* tools: terminal UI, prompt widgets, live views, logging, dates, settings plumbing and small file helpers, implemented once."
 requires-python = ">=3.10"
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = []
+classifiers = [
+    "Environment :: Console :: Curses",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.urls]
+Homepage = "https://github.com/RedEraRrow/backbone"
+Issues = "https://github.com/RedEraRrow/backbone/issues"
 
 [tool.setuptools.packages.find]
 include = ["backbone*"]
