@@ -5,7 +5,7 @@ import os
 import tempfile
 import subprocess
 from backbone.prompt.core import (
-    _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, _render_status_bar,
+    _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, render_status_bar,
     block_cursor, block_cursor_width, _read_key, _cols, _wrap_bordered_input_lines,
     screen_paint, screen_invalidate, screen_takeover_next,
 )
@@ -75,7 +75,7 @@ def text(message: str, default: str = "") -> str | None:
         screen_paint(frame)          # the caret is drawn, not the terminal's own
 
         prev_lines = len(out)
-        _render_status_bar()
+        render_status_bar()
 
     try:
         _set_raw(fd)
@@ -240,7 +240,7 @@ def path(message: str, default: str = "") -> str | None:
         for r in range(len(frame) + 1, _prev_rendered + ui.MARGIN_V + 2):
             frame[r] = ""
         screen_paint(frame)          # the caret is drawn, not the terminal's own
-        _render_status_bar()
+        render_status_bar()
 
     try:
         _set_raw(fd)

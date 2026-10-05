@@ -329,7 +329,7 @@ def _wait_for_keypress(timeout: float = 0.05) -> bool:
         active = ui.has_background_tasks()
         if active or _status_prev_active[0]:
             with quietly():
-                _render_status_bar()
+                render_status_bar()
         _status_prev_active[0] = active
     if _IS_WINDOWS:
         end = time.time() + timeout
@@ -771,7 +771,7 @@ def footer_click_action(row: int, col: int) -> str | None:
     return 'open'
 
 
-def _render_status_bar():
+def render_status_bar():
     """Redraw the bottom status bar in place, saving/restoring the cursor so
     the text input caret doesn't move."""
     rows = ui.get_terminal_height()
