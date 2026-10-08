@@ -12,7 +12,7 @@ from backbone import keys, ui
 from backbone import datetime_parse as dtp
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
-from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _with_toggle_hint, append_chrome, consume_chrome, disable_mouse, enable_mouse
+from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _with_toggle_hint, boxed_chrome, consume_chrome, disable_mouse, enable_mouse, inner_rule
 from backbone.prompt.text import text
 from backbone.prompt.core import C
 
@@ -93,17 +93,13 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
     def _render():
         lines = []
 
-        # Header
-        lines.append(f"  {C.DIM}{message}{C.RESET}")
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
-
         # Month/Year display
         month_name = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][m]
 
         lines.append(f"  {C.BOLD}{month_name} {y}{C.RESET}")
 
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
+        lines.append(inner_rule())
 
         # Day headers
         day_headers = "Mo Tu We Th Fr Sa Su"
@@ -126,8 +122,6 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
                         week_parts.append(f"{day:2d} ")
             lines.append(f"  {''.join(week_parts)}")
 
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
-
         L = keys.label
         _cal_pairs = [(L("calendar.save"), "save"), (L("calendar.back"), "back"),
                       (L("list.quit"), "quit app"), (L("calendar.switch", first=True), "month/day"),
@@ -135,7 +129,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
                       (L("calendar.up", "calendar.down"), "±7 days" if day_mode else "year"),
                       (L("calendar.manual"), "manual entry")]
 
-        append_chrome(lines, _with_toggle_hint(_cal_pairs), _hint_cells)
+        lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(_cal_pairs), _hint_cells)
         w.render(lines)
 
     result = None
@@ -242,7 +236,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
 
             elif act == 'calendar.manual':
                 w.clear()
-                manual = text("Enter date (YYYY-MM-DD):", default=f"{y:04d}-{m:02d}-{cursor_day:02d}")
+                manual = text("Date, as YYYY-MM-DD:", default=f"{y:04d}-{m:02d}-{cursor_day:02d}")
                 if manual:
                     parsed = _parse_date(manual)
                     if parsed:
@@ -332,15 +326,13 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
     def _render():
         lines = []
 
-        lines.append(f"  {C.DIM}{message}{C.RESET}")
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
         # Date section
         month_name = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month]
         dpfx = C.BOLD if section == 'date' else C.DIM
         lines.append(f"  {dpfx}{month_name} {year}{C.RESET}")
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
+        lines.append(inner_rule())
         lines.append("  Mo Tu We Th Fr Sa Su")
 
         for week in cal.monthcalendar(year, month):
@@ -355,7 +347,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                     parts.append(f"{day:2d} ")
             lines.append(f"  {''.join(parts)}")
 
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
+        lines.append(inner_rule())
 
         # Time section
         tpfx = C.BOLD if section == 'time' else C.DIM
@@ -373,8 +365,6 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
             elif i == 2: row += "."
         lines.append(row)
 
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
-
         h = ""
         if section == 'date':
             if not day_mode:
@@ -387,7 +377,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
             h = [("←→", "cursor"), ("tab/⇧tab", "field"), ("↵", "save"),
                  ("esc", "back"), (keys.label("list.quit"), "quit app")]
 
-        append_chrome(lines, _with_toggle_hint(h), _hint_cells)
+        lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(h), _hint_cells)
         w.render(lines)
 
     def _build_result() -> str:

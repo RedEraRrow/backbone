@@ -59,3 +59,58 @@ class PrintInlineProgressTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProgressBarSpanTest(unittest.TestCase):
+    def test_span_is_accent_up_to_now_then_dim(self):
+        bar = ui.get_progress_bar(0.5, 20, (0.4, 0.7))
+        self.assertEqual(ui.strip_ansi(bar), "[" + "━" * 14 + " " * 6 + "]")
+        self.assertIn(f"{ui.Colors.ACCENT}━━{ui.Colors.RESET}", bar)       # cells 8-9: played
+        self.assertIn(f"{ui.Colors.DIM}━━━━ ", bar)                         # cells 10-13: to come, then empty
+
+    def test_cells_alone_take_a_rest_glyph(self):
+        cells = ui.strip_ansi(ui.progress_cells(0.5, 10, (0.3, 0.8), rest="─"))
+        self.assertEqual(cells, "━" * 8 + "──")
+
+    def test_no_span_is_unchanged(self):
+        self.assertNotIn(ui.Colors.ACCENT, ui.get_progress_bar(0.5, 20))
+
+
+class BreadcrumbHiddenTest(unittest.TestCase):
+    def test_a_full_screen_view_hides_it_and_gives_it_back(self):
+        from backbone.nav import NAV_STACK
+        NAV_STACK[:] = ['Browse', 'A Quiet Night Out']
+        try:
+            with patch.object(ui, 'get_terminal_width', return_value=80):
+                self.assertIn('A Quiet Night Out', ui.get_status_line())
+                ui.hide_breadcrumb(True)
+                self.assertNotIn('A Quiet Night Out', ui.get_status_line())
+                ui.show_status("Volume: 80%")
+                line = ui.strip_ansi(ui.get_status_line())
+                self.assertTrue(line.rstrip().endswith("Volume: 80%") and line.startswith(" " * 40), line)
+                ui._toast_message = ""
+                ui.hide_breadcrumb(False)
+                self.assertIn('A Quiet Night Out', ui.get_status_line())
+        finally:
+            NAV_STACK[:] = []
+
+
+class MarqueeTest(unittest.TestCase):
+    def test_fits_holds_scrolls_and_starts_over(self):
+        text = "abcdefghij"                       # 10 wide, shown in 6: 4 to scroll
+        self.assertEqual(ui.marquee("short", 10, 99.0), "short")
+        self.assertEqual(ui.marquee(text, 6, 0.0, speed=4), "abcdef")          # held at the start
+        self.assertEqual(ui.marquee(text, 6, 2.5, speed=4), "cdefgh")          # 0.5 s in at 4 cols/s
+        self.assertEqual(ui.marquee(text, 6, 3.5, speed=4), "efghij")          # at the end, held
+        self.assertEqual(ui.marquee(text, 6, 5.0, speed=4), "abcdef")          # one cycle is 5 s
+
+    def test_the_default_moves_a_column_a_beat(self):
+        beat = 60 / ui.MARQUEE_BPM
+        self.assertEqual(ui.marquee("abcdefghij", 6, 2.0 + 2 * beat + 0.01), "cdefgh")
+
+    def test_the_speed_can_be_set(self):
+        was = ui.MARQUEE_BPM
+        self.addCleanup(ui.set_marquee_bpm, was)
+        ui.set_marquee_bpm(120)                                                # half a second a column
+        self.assertEqual(ui.MARQUEE_STEP_S, 0.5)
+        self.assertEqual(ui.marquee("abcdefghij", 6, 2.0 + 1.01), "cdefgh")

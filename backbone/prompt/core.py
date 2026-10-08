@@ -7,9 +7,10 @@ import math
 import textwrap
 import time
 import select as _sel
+from dataclasses import dataclass, field
 from typing import Any
 
-from backbone import keys, ui
+from backbone import keys, nav, ui
 from backbone.log import log, enabled as _logging, quietly
 C = ui.Colors
 
@@ -49,8 +50,6 @@ def _restore_term_attrs(fd: int, old):
 
 
 _footer_prev_h = [0]
-_footer_prev_lines: list = [None]
-_footer_prev_sig: list = [object()]          # last-drawn track identity (never == a real sig)
 _footer_last_draw = [0.0]
 _status_prev_active = [False]            # was a background task shown last idle tick?
 
@@ -89,6 +88,12 @@ if _wake_r >= 0:
 # makes the screen flicker and the now-playing box blink on every keystroke. Rows are also written *absolutely*, with no newlines,
 # so a line-buffered stdout cannot flush a half-drawn frame.
 _screen: dict[int, str] = {}
+# Each row's cells as last painted, (style, character) per column, so a changed
+# row rewrites only the cells that changed: rewriting a whole row erases an
+# image drawn over part of it (album art), which then flickers as it's resent.
+_cells: dict[int, list] = {}
+# The columns (first, last; 1-based) the last paint of each row wrote.
+_painted: dict[int, list] = {}
 # The terminal size the model was painted at. A resize reflows what is on
 # screen, so the model no longer describes it: the next paint wipes the screen
 # and repaints every row, whether or not the screen's own code thought to clear.
@@ -103,7 +108,11 @@ def screen_invalidate() -> None:
     if _screen_size[0] is not None and size != _screen_size[0]:
         _note_resize(_screen_size[0], size)
         _screen_size[0] = size
+    _reserved.clear()                    # a frame after this reserves afresh
+    _shown_pictures.clear()              # a clear took them with it
+    _float.clear()
     _screen.clear()
+    _cells.clear()
 
 
 def _note_resize(was: tuple, size: tuple) -> None:
@@ -129,6 +138,8 @@ def _resize_wipe() -> str:
     if was is not None:
         _note_resize(was, size)
     _screen.clear()
+    _cells.clear()
+    _shown_pictures.clear()
     return "\033[H\033[2J" if was is not None else ""
 
 
@@ -163,8 +174,11 @@ def _takeover_rows(frame: dict) -> dict:
         return frame
     _takeover_pending[0] = False
     out = dict(frame)
+    rows = ui.get_terminal_height()
+    footer = range(rows - _footer_prev_h[0], rows)           # the now-playing box: its own painter's
     for row in _screen:
-        out.setdefault(row, "")
+        if row not in footer:
+            out.setdefault(row, "")
     return out
 
 
@@ -177,6 +191,7 @@ def screen_forget_rows(first: int, last: int) -> None:
     """Forget rows `first`..`last` inclusive (another writer owns them now)."""
     for r in range(first, last + 1):
         _screen.pop(r, None)
+        _cells.pop(r, None)
 
 
 def screen_row_paint(row: int, text: str, extra: str = "") -> str:
@@ -188,16 +203,428 @@ def screen_row_paint(row: int, text: str, extra: str = "") -> str:
     of the row's identity, so a row repaints when *either* changes, and a row
     whose overlay went away is erased rather than keeping stale glyphs. A blank
     row is content too: "" differs from anything previously drawn there.
+
+    While an app runs as tabs, the top rows are the tab bar whatever is
+    painted there: every screen leaves them as its top margin (top_margin()).
     """
-    wipe = _resize_wipe()
-    key = f"{text}\x00{extra}"
-    if _screen.get(row) == key:
+    if row > ui.get_terminal_height():
+        # Past the bottom (a frame laid out before the window shrank): the
+        # terminal would write it on the last row, over what belongs there.
+        _screen.pop(row, None); _cells.pop(row, None)
         return ""
+    if nav.TABS and row <= ui.tab_rows():
+        text, extra = ui.tab_bar_lines()[row - 1], ""
+    notch = ui.tab_notch() if row == ui.tab_rows() + 1 else None
+    wipe = _resize_wipe()
+    key = f"{text}\x00{extra}\x00{notch}"
+    if _screen.get(row) == key:
+        _painted[row] = []
+        return ""
+    old = _cells.get(row) if row in _screen else None
     _screen[row] = key
     if _logging() and _row_width(text) > (_screen_size[0] or (0, 0))[0]:
         log.warning("row %d painted %d wide in a %d-column window: %r", row,
                     _row_width(text), _screen_size[0][0], ui.strip_ansi(text)[:80])
-    return f"{wipe}\033[{row};1H\033[2K{text}{extra}"
+    new = _row_cells(text, extra)
+    if notch and new is not None:
+        new = _notched(new, notch)
+    held = _reserved.get(row)
+    if new is not None and held:
+        # Someone else's cells on this row (the lyrics): left exactly as they
+        # are, even on a row this paint doesn't know (then every other cell is
+        # written, but never the whole row wiped).
+        known = old if old is not None and not wipe else []
+        old = known + [_UNKNOWN] * max(0, len(new) - len(known))
+        width = max(len(new), len(old), max(b for _a, b in held))
+        new = new + [_BLANK] * (width - len(new))
+        for a, b in held:
+            for i in range(a - 1, b):
+                new[i] = old[i] if i < len(old) else _UNKNOWN
+        _cells[row] = new
+        out, _painted[row] = _cells_diff(row, old, new)
+        return wipe + out
+    if new is None or old is None or wipe:
+        # A row not known cell by cell (first paint, after a clear, an escape
+        # this doesn't follow): written whole, as it always was.
+        _cells.pop(row, None) if new is None else _cells.__setitem__(row, new)
+        _painted[row] = [(1, 10 ** 6)]
+        if notch and new is not None and not _float_cols(row):   # drawn from its cells: the notch is in them
+            return f"{wipe}\033[{row};1H\033[2K" + _cells_diff(row, [], new)[0]
+        if new is not None and _float_cols(row):      # a floating box over it: every cell but its
+            return wipe + _cells_diff(row, [_UNKNOWN] * max(len(new), ui.get_terminal_width()), new)[0]
+        return f"{wipe}\033[{row};1H\033[2K{text}{extra}"
+    _cells[row] = new
+    out, _painted[row] = _cells_diff(row, old, new)
+    return out
+
+
+_EDGE = ("─", "┈")                    # a box's top border, plain or dotted
+
+
+def _notched(cells: list, notch: tuple) -> list:
+    """The row under the tab bar with the showing tab's outline run into it:
+    where a box's top border lies under the tab, an opening cut in it (the
+    tab's sides turning into the border, or carrying on as the box's own
+    side at its corner), and that box's title moved to the right end of its
+    border, clear of the tab (dropped when there's no room: the breadcrumb
+    says it too). Over blank cells, the tab is closed underneath."""
+    a, b = notch
+    cells = list(cells) + [_BLANK] * max(0, b + 1 - len(cells))
+    left = next((i for i in range(min(a, len(cells) - 1), -1, -1) if cells[i][1] == "╭"), None)
+    right = next((i for i in range(left + 1, len(cells)) if cells[i][1] == "╮"), None) if left is not None else None
+    if left is not None and right is not None and right >= b:
+        _title_right(cells, left, right, b)
+        # Border text under the tab (a subtitle, the toggle, in a narrow
+        # window) gives way to it, a whole run between dashes at a time.
+        lo, hi = max(a, left + 1), min(b, right - 1)
+        if any(cells[i][1] not in _EDGE for i in range(lo, hi + 1)):
+            while lo > left + 1 and cells[lo - 1][1] not in _EDGE:
+                lo -= 1
+            while hi < right - 1 and cells[hi + 1][1] not in _EDGE:
+                hi += 1
+            for i in range(lo, hi + 1):
+                cells[i] = cells[left + 1]
+        if all(cells[i][1] in _EDGE or i in (left, right) for i in range(a, b + 1)):
+            style = cells[left][0]
+            cells[a] = (style, "│" if a == left else "╯")
+            cells[b] = (style, "│" if b == right else "╰")
+            for i in range(a + 1, b):
+                cells[i] = _BLANK
+            return cells
+    if all(c[1] == " " for c in cells[a:b + 1]):
+        cells[a], cells[b] = (C.DIM, "╰"), (C.DIM, "╯")
+        for i in range(a + 1, b):
+            cells[i] = (C.DIM, "─")
+    return cells
+
+
+def _title_right(cells: list, left: int, right: int, after: int) -> None:
+    """Move a box's top-border title (" Title ", just after its corner) to
+    the right end of the border, before what's already there (a subtitle,
+    the help toggle), past column `after`; drop it if it won't fit."""
+    if left + 2 >= right or cells[left + 1][1] not in _EDGE or cells[left + 2][1] != " ":
+        return
+    end = next((i for i in range(left + 3, right) if cells[i][1] in _EDGE and cells[i - 1][1] == " "), None)
+    if end is None:
+        return
+    title, dash = cells[left + 2:end], cells[left + 1]
+    for i in range(left + 2, end):
+        cells[i] = dash
+    stop = next((i for i in range(end, right) if cells[i][1] not in _EDGE), right) - 1
+    room = stop - (after + 2)                          # columns between the tab and what's at the right
+    if len(title) > room >= 8:                         # shortened, rather than lost: " Tag ID (e.g. …"
+        title = title[:room - 2] + [(title[room - 3][0], "…"), title[-1]]
+        while title[-3][1] == "":                      # never half a wide character before the …
+            title[-3:-2] = []
+            title.insert(-2, (title[-2][0], " "))
+    start = stop - len(title)
+    if start > after + 1:
+        cells[start:stop] = title
+
+
+# Cells someone other than the row's painter draws (the player's lyrics, which
+# move on their own clock): row → [(first, last) columns, 1-based]. A row paint
+# leaves them be; their owner writes them with screen_span_paint.
+_reserved: dict = {}
+
+
+def screen_reserve(first_row: int, last_row: int, first_col: int, last_col: int) -> None:
+    """Keep the rectangle's cells out of row paints (see _reserved)."""
+    for r in range(first_row, last_row + 1):
+        _reserved.setdefault(r, []).append((first_col, last_col))
+
+
+def screen_release() -> None:
+    """Drop every reservation: rows are their painters' whole again."""
+    _reserved.clear()
+
+
+def screen_span_paint(row: int, col: int, text: str) -> str:
+    """The escape that writes `text` from (row, col) cell by cell: only the
+    cells that changed, the rest of the row as it was (and still known), so
+    nothing beside it (an image) is disturbed. For a part of a row with its
+    own owner: the lyrics, the progress bar."""
+    if row > ui.get_terminal_height():                # past the bottom: see screen_row_paint
+        return ""
+    span = _row_cells(text)
+    if span is None:
+        _screen.pop(row, None); _cells.pop(row, None)
+        return f"\033[{row};{col}H{text}"
+    old = _cells.get(row) if row in _screen else None
+    known = old if old is not None else []
+    new = known + [_UNKNOWN] * max(0, col - 1 + len(span) - len(known))
+    before = list(new)
+    if old is None:                                  # unknown row: the span's cells all written
+        before = [_UNKNOWN] * len(new)
+    new[col - 1:col - 1 + len(span)] = span
+    _cells[row] = new
+    _screen[row] = _screen.get(row, "") + "\x00span"          # the row's text no longer says it all
+    out, spans = _cells_diff(row, before, new)
+    _painted[row] = spans
+    return out
+
+
+_ESCAPE = re.compile(r'\x1b\[([0-9;]*)m|\x1b\[(\d+);(\d+)H|\x1b\[K|\x1b')
+_BLANK = ("", " ")
+
+
+def _row_cells(text: str, extra: str = "") -> list | None:
+    """A row as cells, (style, character) per column: `text`, then `extra`'s
+    overlays (each placed by its own cursor move) over it. A wide character's
+    second cell has character "". None when the row holds an escape this
+    doesn't follow (it is then written whole)."""
+    cells: list = []
+    style, col = "", 0
+
+    def put(ch: str) -> None:
+        nonlocal col
+        w = ui.char_cols(ch)
+        if w == 0:                                  # a combining mark: onto the last character
+            if col and col - 1 < len(cells):
+                st, prev = cells[col - 1]
+                cells[col - 1] = (st, prev + ch)
+            return
+        while len(cells) < col + w:
+            cells.append(_BLANK)
+        cells[col] = (style, ch)
+        if w == 2:
+            cells[col + 1] = (style, "")
+        col += w
+
+    for part in (text, extra):
+        pos = 0
+        for m in _ESCAPE.finditer(part):
+            for ch in part[pos:m.start()]:
+                put(ch)
+            pos = m.end()
+            seq = m.group(0)
+            if m.group(1) is not None:              # a colour or style
+                style = "" if m.group(1) in ("", "0") else style + seq
+            elif m.group(2) is not None:            # an overlay's own column
+                col = int(m.group(3)) - 1
+            elif seq == "\x1b[K":                   # erase the rest of the row
+                del cells[col:]
+            else:
+                return None
+        for ch in part[pos:]:
+            put(ch)
+        style = ""
+    return cells
+
+
+def _cells_diff(row: int, old: list, new: list) -> tuple[str, list]:
+    """What writes row `row` from `old` cells to `new`: only the runs that
+    changed (a run widened to keep wide characters whole), a shorter row's
+    end erased; and those runs' columns (first, last; 1-based). Cells under
+    a floating box (screen_float) aren't written: it's over them."""
+    n = max(len(old), len(new))
+    under = _float_cols(row)
+    if under:                                        # no erasing to the end of the row past it: blanks
+        new = list(new) + [_BLANK] * (n - len(new))
+    cell = lambda cells, i: cells[i] if i < len(cells) else _BLANK      # noqa: E731
+    changed = [i for i in range(n) if cell(old, i) != cell(new, i) and i not in under]
+    if not changed:
+        return "", []
+    runs, start, last = [], changed[0], changed[0]
+    for i in changed[1:]:
+        if i > last + 1:
+            runs.append((start, last))
+            start = i
+        last = i
+    runs.append((start, last))
+    out, spans = [], []
+    for a, b in runs:
+        while a > 0 and (cell(new, a)[1] == "" or cell(old, a)[1] == ""):   # the start of a wide character
+            a -= 1
+        while b + 1 < n and (cell(new, b + 1)[1] == "" or cell(old, b + 1)[1] == ""):
+            b += 1
+        spans.append((a + 1, b + 1))
+        seg, cur = [f"\033[{row};{a + 1}H"], None
+        if a >= len(new):                           # past the new row's end: erase the rest
+            out.append(seg[0] + "\033[0m\033[K")
+            continue
+        for i in range(a, min(b + 1, len(new))):
+            st, ch = new[i]
+            if ch is None:                          # a cell someone else draws: step over it
+                seg.append(f"\033[{row};{i + 2}H")
+                continue
+            if st != cur:
+                seg.append("\033[0m" + st)
+                cur = st
+            if ch[:1] in ui.AMBIGUOUS_WIDE:
+                # Counted two cells, drawn one or two depending on the font:
+                # blank its second cell first, then place what follows by
+                # column, so either way nothing shifts or is left behind.
+                seg.append(f"\033[{row};{i + 2}H \033[{row};{i + 1}H{ch}\033[{row};{i + 3}H")
+                continue
+            seg.append(ch)
+        seg.append("\033[0m")
+        if b + 1 > len(new):                        # it runs off the new row's end
+            seg.append("\033[K")
+        out.append("".join(seg))
+    return "".join(out), spans
+
+
+_UNKNOWN = (None, None)               # a cell the painter no longer vouches for
+
+
+def screen_forget_cells(first_row: int, last_row: int, first_col: int, last_col: int) -> None:
+    """Forget the cells in rows first_row..last_row, columns first_col..last_col
+    (1-based): something else drew over them (an image), so the next paint of
+    those rows writes them again, and only them."""
+    for r in range(first_row, last_row + 1):
+        cells = _cells.get(r)
+        if cells is None:
+            continue
+        while len(cells) < last_col:
+            cells.append(_BLANK)
+        for c in range(first_col - 1, last_col):
+            cells[c] = _UNKNOWN
+        _screen[r] = _screen.get(r, "") + "\x00forgotten"       # so the row isn't skipped as unchanged
+
+
+_shown_pictures: list = []           # the last widget frame's pictures, for screen_restore
+
+
+# A box floating over the screen for a moment (screen_float: the volume as it
+# changes): its rows and columns, its lines, and when it goes. What's under
+# it is kept in the model as ever, just not written, and put back after.
+_float: dict = {}
+
+
+def _float_cols(row: int) -> set:
+    """The 0-based columns of `row` the floating box covers (none, mostly)."""
+    if not _float or not _float['top'] <= row < _float['top'] + len(_float['lines']):
+        return set()
+    return set(range(_float['left'] - 1, _float['left'] - 1 + _float['w']))
+
+
+def screen_float(lines: list, seconds: float) -> None:
+    """Float `lines` (a small box, all one width) over the middle of the
+    screen for `seconds`, then put back what's under it. Showing again while
+    it's up replaces it and starts its time again. Nothing else stops for it:
+    the screen goes on painting round it (see float_tick)."""
+    cols, rows = ui.get_terminal_size()
+    lines = [ui.clip_ansi(ln, cols) for ln in lines[:rows]]
+    w = max((ui.visual_len(ln) for ln in lines), default=0)
+    place = dict(w=w, top=max(1, (rows - len(lines)) // 2 + 1), left=max(1, (cols - w) // 2 + 1))
+    if _float and (len(_float['lines']), _float['w'], _float['top'], _float['left']) != (
+            len(lines), place['w'], place['top'], place['left']):
+        _float_gone()                # a new shape: put back what the old one covered first
+    _float.update(lines=lines, until=time.time() + seconds, **place)
+    _float_draw()
+
+
+def screen_float_close() -> None:
+    """Take a floating box away now, putting back what it covered."""
+    if _float:
+        _float_gone()
+
+
+_PROGRESS_W = 64                     # the progress box's widest
+
+
+def progress_float(message: str, progress: float) -> None:
+    """A blocking job's progress (`progress` 0-1, `message` what it's on) in a
+    box over the middle of the screen, the same width throughout so it holds
+    still as the names change; screen_float_close takes it away."""
+    cols, rows = ui.get_terminal_size()
+    w = min(cols, _PROGRESS_W)
+    boxed = rows >= 3 and w >= 16
+    room = w - 4 if boxed else cols
+    bar = ui.get_progress_bar(progress, max(4, min(24, room // 3)))
+    head = f"{ui.pulse_circle()} {bar} "
+    text = head + C.DIM + ui.truncate_text(message, max(1, room - ui.visual_len(head))) + C.RESET
+    text += " " * max(0, room - ui.visual_len(text))
+    lines = [ln[ui.MARGIN_H:] for ln in box_lines([text], w, 3)] if boxed else [text]
+    screen_float(lines, 24 * 3600)   # up till it's closed
+
+
+def _float_draw() -> None:
+    sys.stdout.write("\0337" + "".join(f"\033[{_float['top'] + k};{_float['left']}H{C.RESET}{ln}{C.RESET}"
+                                       for k, ln in enumerate(_float['lines'])) + "\0338")
+    sys.stdout.flush()
+
+
+def _float_gone() -> None:
+    """Put back what the floating box covered, from the model, and any
+    picture of the screen it was over."""
+    top, left, w, h = _float['top'], _float['left'], _float['w'], len(_float['lines'])
+    _float.clear()
+    out = []
+    for r in range(top, top + h):
+        cells = list(_cells.get(r) or [])
+        cells += [_BLANK] * max(0, left - 1 + w - len(cells))
+        before = cells[:left - 1] + [_UNKNOWN] * w + cells[left - 1 + w:]
+        out.append(_cells_diff(r, before, cells)[0])
+    for r, c, n, _k, esc, *size in _shown_pictures:
+        last = c + (size[0] if size else 10 ** 6) - 1
+        if r < top + h and r + n > top and c < left + w and last >= left:
+            out.append(f"\0337\033[{r};{c}H{esc}\0338")
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+
+
+def float_tick() -> bool:
+    """Keep a floating box on top while it's up (a picture sent over it is
+    put under it again), and take it away when its time is up. True when it
+    just went: a screen with a picture of its own under it redraws that."""
+    if not _float:
+        return False
+    if time.time() < _float['until']:
+        _float_draw()
+        return False
+    _float_gone()
+    return True
+
+
+def screen_forget_pictures() -> None:
+    """For a screen that draws without _Widget (a player view): forget the
+    cells under the pictures the last widget drew, so this screen's paint
+    writes them all and no picture of that screen is left showing through."""
+    for r, c, n, _k, _esc, *size in _shown_pictures:
+        if size:
+            screen_forget_cells(r, r + n - 1, c, c + size[0] - 1)
+        else:
+            screen_forget_rows(r, r + n - 1)
+    _shown_pictures.clear()
+
+
+def screen_save(first_row: int, last_row: int, first_col: int, last_col: int) -> dict:
+    """What the painter holds in a rectangle, to put back with screen_restore
+    once something drawn over it (an overlay) is gone."""
+    return {'rect': (first_row, last_row, first_col, last_col),
+            'cells': {r: [(_cells.get(r) or [])[c] if c < len(_cells.get(r) or []) else _BLANK
+                          for c in range(first_col - 1, last_col)]
+                      for r in range(first_row, last_row + 1)}}
+
+
+def screen_restore(saved: dict) -> str:
+    """The escape that puts a saved rectangle back, cell by cell, and redraws
+    any picture (an image) it overlapped, which writing over it erased."""
+    r0, r1, c0, c1 = saved['rect']
+    out = []
+    for r, cells in saved['cells'].items():
+        text, cur = [], None
+        for st, ch in cells:
+            if ch is None:
+                st, ch = "", " "                      # a cell nothing vouched for: blank
+            if st != cur:
+                text.append(C.RESET + st)
+                cur = st
+            text.append(ch)
+        out.append(screen_span_paint(r, c0, "".join(text) + C.RESET))
+    for r, c, n, _k, esc, *size in _shown_pictures:
+        last = c + (size[0] if size else 10 ** 6) - 1
+        if r <= r1 and r + n - 1 >= r0 and c <= c1 and last >= c0:
+            out.append(f"\0337\033[{r};{c}H{esc}\0338")
+    return "".join(out)
+
+
+def screen_painted(row: int, first: int, last: int) -> bool:
+    """Whether the last paint of `row` wrote any of columns first..last
+    (1-based): whether an image over them was erased and needs drawing again."""
+    return any(a <= last and b >= first for a, b in _painted.get(row, ()))
 
 
 def screen_row_segment(row: int, text: str) -> str:
@@ -234,12 +661,11 @@ def screen_paint(rows: dict, *, cursor: tuple | None = None,
 
 def _footer_box_str(rows: int, lines: list) -> str:
     """Escape string that draws the now-playing box in the rows just above the
-    breadcrumb, clearing any band a taller previous box left behind. Updates the
-    shared cache so the widget render and the idle tick agree on what's shown."""
+    breadcrumb, clearing any band a taller previous box left behind, through
+    the screen model (unchanged rows write nothing). Keeps the box's height
+    for the layout (footer_height_for_layout)."""
     if rows <= 1:
         _footer_prev_h[0] = 0
-        _footer_prev_lines[0] = []
-        _footer_prev_sig[0] = ui.footer_signature()
         return ""
 
     max_box_rows = max(0, rows - 1)
@@ -264,8 +690,6 @@ def _footer_box_str(rows: int, lines: list) -> str:
         if seg:
             parts.append(seg)
     _footer_prev_h[0] = h
-    _footer_prev_lines[0] = lines
-    _footer_prev_sig[0] = ui.footer_signature()
     return "".join(parts)
 
 
@@ -285,12 +709,11 @@ def footer_box_segment() -> str:
 
 
 def invalidate_footer_box() -> None:
-    """Drop the last-drawn box cache so the next idle tick repaints unconditionally.
-    Used on focus-in: while a window is unfocused the terminal may not paint
-    our box writes, yet the cache advances as if it had, leaving the box stale
-    after refocus until an interaction. Forcing a repaint fixes it without a click."""
-    _footer_prev_lines[0] = None
-    _footer_prev_sig[0] = object()          # sentinel: never equal to a real signature
+    """Forget the box's rows so the next idle tick repaints them. Used on
+    focus-in: while a window is unfocused the terminal may not paint our box
+    writes, yet the model advances as if it had."""
+    rows = ui.get_terminal_height()
+    screen_forget_rows(rows - _footer_prev_h[0], rows - 1)
     _footer_last_draw[0] = 0.0              # let the next poll repaint immediately
 
 
@@ -305,8 +728,8 @@ def _render_footer_bar() -> None:
     if len(lines) != _footer_prev_h[0]:
         # The box appeared or vanished: the menu must re-reserve rows for it.
         ui.mark_footer_layout_dirty()
-    if ui.footer_signature() == _footer_prev_sig[0] and lines == _footer_prev_lines[0]:
-        return
+    # Every tick, through the screen model: rows that already read this way
+    # cost nothing, and any a screen change wiped are put back at once.
     seg = _footer_box_str(rows, lines)
     if seg:                       # unchanged rows produce nothing to write
         sys.stdout.write("\0337" + seg + "\0338")
@@ -323,6 +746,7 @@ def _wait_for_keypress(timeout: float = 0.05) -> bool:
         _footer_last_draw[0] = now
         with quietly():
             _render_footer_bar()
+            float_tick()
         # Keep the background-activity notice live: while a task is running the
         # status bar is re-stamped each tick so it stays up for the whole job and
         # its cyan ● pulses; one extra redraw after the last task clears the bar.
@@ -403,6 +827,40 @@ def toggle_hints() -> None:
         pass
 
 
+_toggle_shown: list = [None]  # None until first read
+
+
+def _toggle_hidden_file():
+    from backbone import app
+    return app.config_dir / "help_toggle_hidden"
+
+
+def help_toggle_shown() -> bool:
+    """Whether the `[?] help` toggle is drawn. Off, `?` still shows the hints:
+    you just have to know it's there."""
+    if _toggle_shown[0] is None:
+        try:
+            _toggle_shown[0] = not _toggle_hidden_file().exists()
+        except Exception:
+            _toggle_shown[0] = True
+    return _toggle_shown[0]
+
+
+def set_help_toggle_shown(shown: bool) -> None:
+    """Draw the `[?] help` toggle or not, and remember it (kept beside the
+    hints switch, for the same reason)."""
+    _toggle_shown[0] = shown
+    try:
+        f = _toggle_hidden_file()
+        if shown:
+            f.unlink(missing_ok=True)
+        else:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.touch()
+    except OSError:
+        pass
+
+
 def is_hints_key(key: str, key_free: bool) -> bool:
     """Whether `key` toggles the hints: a click on the corner, Ctrl-/, or `?`
     where the screen leaves `?` free (not typed or bound)."""
@@ -413,7 +871,10 @@ def is_hints_key(key: str, key_free: bool) -> bool:
 def help_corner_text(help_key: bool = True, shown: bool | None = None) -> tuple[str, int]:
     """The header toggle, styled, and its width: `[?] help` / `[?] hide help`,
     or `[^/] …` where `?` is typed (a text field) and Ctrl-/ is the key.
-    `shown`: the hints' state to describe (default: as they are now)."""
+    `shown`: the hints' state to describe (default: as they are now).
+    Nothing, when the toggle is switched off (help_toggle_shown)."""
+    if not help_toggle_shown():
+        return "", 0
     key = keys.label("global.help" if help_key else "global.help_typed", first=True) or " "
     label = "hide help" if (hints_visible() if shown is None else shown) else "help"
     return (f"{C.RESET}{C.DIM}[{C.RESET}{C.BOLD}{key}{C.RESET}{C.DIM}] {label}{C.RESET}",
@@ -437,6 +898,10 @@ def add_help_corner(line: str, row: int, cells: dict, help_key: bool = False) ->
     is clickable (a click replays HINTS_CLICK). `help_key`: pressing `?` toggles
     here; elsewhere `?` is typed or bound, and the toggle names Ctrl-/."""
     text, width = help_corner_text(help_key)
+    if not width:                                    # the toggle is switched off
+        if help_key:
+            cells['__help_key__'] = True
+        return line
     col = max(1, ui.get_terminal_width() - ui.MARGIN_H - width + 1)
     room = col - 2                                   # keep one blank column before it
     body = line if ui.visual_len(ui.strip_ansi(line)) <= room else _clip_ansi(line, room)
@@ -445,6 +910,279 @@ def add_help_corner(line: str, row: int, cells: dict, help_key: bool = False) ->
     if help_key:
         cells['__help_key__'] = True                 # consume_chrome: `?` toggles here
     return f"{body}{C.RESET}{' ' * pad}{text}"
+
+
+# A list draws inside a rounded box when the window has room for one; smaller
+# than this, it draws as plain lines (the narrow-window rule, in one place).
+_BOX_MIN_WIDTH = 9                   # a box round a column of text: boxed at any width that holds one
+_BOX_MIN_HEIGHT = 10                 # a shorter window gives up the boxes first (its rows go to the rows)
+
+
+def box_fits() -> bool:
+    """Whether panels are boxed: at any width that holds a box, in a window
+    tall enough that its borders don't cost the list its rows."""
+    return ui.get_terminal_width() >= _BOX_MIN_WIDTH and ui.get_terminal_height() >= _BOX_MIN_HEIGHT
+
+
+class PanelTitle:
+    """A list's header that names the panel: drawn in its box's top border (the
+    subtitle as its first line), or as a title line when the window is too
+    short for a box. Pass one as select(header=…)."""
+
+    def __init__(self, title: str, subtitle: str | None = None):
+        self.title, self.subtitle = title, subtitle or ""
+
+    def __call__(self) -> list[str]:                 # the unboxed form
+        sub = f"  {C.DIM}{self.subtitle}{C.RESET}" if self.subtitle else ""
+        return [f"  {C.BOLD}{self.title}{C.RESET}{sub}"]
+
+
+def box_lines(lines: list[str], width: int, height: int, title: str = "", right: str = "",
+              focused: bool = True, dotted: bool = False) -> list[str]:
+    """`lines` inside a rounded box `width` columns wide and `height` rows tall
+    (borders included), inset by the left margin: `title` in the top border
+    (in the second accent when `focused`), `right` at its far end, each line
+    clipped or padded to the room inside, blank rows below them. `dotted`: its
+    edges perforated (a tool of its own, like the lyrics editor)."""
+    h, v = ("┈", "┊") if dotted else ("─", "│")
+    inner = max(1, width - 4)                         # "│ " + content + " │"
+    pad = " " * ui.MARGIN_H
+    name = f" {title} " if title else ""
+    # Short of room, the title and the right end (a subtitle, the help
+    # toggle) each keep up to half the border, the longer giving way first.
+    avail = width - 4 - 3
+    ln, lr = ui.visual_len(name), ui.visual_len(right)
+    if right and ln + lr > avail:
+        fit = avail - min(ln, max(avail // 2, avail - lr))
+        if lr > fit:
+            # The help toggle at its end stays whole (it's clicked, and found
+            # there by place_help_toggle); what's before it shortens.
+            toggle = next((t for t, _w in _toggle_variants() if t and right.endswith(t)), "")
+            head, tw = right[:len(right) - len(toggle)], ui.visual_len(toggle)
+            room_h = fit - tw
+            head = (_clip_ansi(head, room_h - 2) + f"{C.DIM}… {C.RESET}") if room_h > 4 else ""
+            right = head + toggle if tw <= fit else ""
+    tail = f" {right} ─" if right else ""
+    room = width - 4 - ui.visual_len(tail)
+    if ui.visual_len(name) > room:
+        name = (_clip_ansi(name, max(0, room - 2)) + "… ") if room > 2 else ""
+    rule = max(1, width - 3 - ui.visual_len(name) - ui.visual_len(tail))
+    shade = C.PRIMARY if focused else C.DIM
+    tail = f"{C.DIM} {C.RESET}{right}{C.DIM} ─{C.RESET}" if right else ""
+    if dotted and tail:
+        tail = tail.replace(" ─", f" {h}")
+    top = (f"{pad}{C.DIM}╭{h}{C.RESET}{shade}{C.BOLD}{name}{C.RESET}{C.DIM}{h * rule}{C.RESET}"
+           f"{tail}{C.DIM}╮{C.RESET}")
+    body = [_clip_ansi(ln, inner) for ln in lines[:max(0, height - 2)]]
+    body += [""] * (max(0, height - 2) - len(body))
+    mid = [f"{pad}{C.DIM}{v}{C.RESET} {ln}{C.RESET}{' ' * (inner - ui.visual_len(ln))} {C.DIM}{v}{C.RESET}" for ln in body]
+    return [top, *mid, f"{pad}{C.DIM}╰{h * (width - 2)}╯{C.RESET}"]
+
+
+def border_right(subtitle: str | None, help_key: bool | None) -> str:
+    """The right end of a box's top border: a dim `subtitle`, then the hints
+    toggle (`help_key` None: none; else as help_corner_text has it)."""
+    parts = [f"{C.DIM}{subtitle}{C.RESET}"] if subtitle else []
+    toggle = help_corner_text(help_key)[0] if help_key is not None else ""
+    if toggle:
+        parts.append(toggle)
+    return f"{C.DIM} ─ {C.RESET}".join(parts)
+
+
+def wrap_path(path: str, width: int) -> list[str]:
+    """`path` in lines of at most `width` columns, broken after a slash where
+    it can be (inside a name only when the name alone is too long)."""
+    width = max(1, width)
+    lines, line = [], ""
+    for part in re.findall(r'[^/]*/|[^/]+$', path) or [""]:
+        while ui.visual_len(line + part) > width:
+            if line:
+                lines.append(line); line = ""
+            else:
+                lines.append(part[:width]); part = part[width:]
+        line += part
+    return lines + [line] if line or not lines else lines
+
+
+def path_box(path: str, title: str) -> list[str]:
+    """A box the window's width holding `path` (wrapped at its slashes),
+    `title` in its border: a list's header, for a file's path shown as itself
+    rather than squeezed into a title."""
+    rows = wrap_path(path, _cols() - 4)
+    return box_lines(rows, _cols(), len(rows) + 2, title, help_corner_text()[0])
+
+
+def boxed_frame(h_lines: list[str], body: list[str], title: str, box_h: int,
+                help_key: bool = False, width: int | None = None) -> list[str]:
+    """A list widget's frame with its body in a box under any header lines:
+    each body line drops its own left margin (the border is the margin now),
+    and with no header the box's top border carries the `[?] help` toggle.
+    The box is `width` wide (all of it when None)."""
+    right = help_corner_text(help_key)[0] if not h_lines else ""
+    inner = [ln[ui.MARGIN_H:] if ln.startswith(" " * ui.MARGIN_H) else ln for ln in body]
+    return h_lines + box_lines(inner, width or _cols(), box_h, title, right)
+
+
+# The column browser (select(trail=…, preview=…)): one box holding the levels
+# above the list as columns, oldest first, then the list; beside it the preview
+# of the highlighted row (its details in one box, what it holds in another), or
+# in a window too narrow for that, a strip of its details under the list.
+_COL_SEP = 3                         # " │ " between columns
+_COL_MAIN_MIN = (20, 36)             # the list's own column: least, and as much as it keeps before others get room
+_COL_PREVIEW = (30, 40)              # the preview's width: least, and most as a share of the window (%)
+_COL_TRAIL = (10, 28)                # each column of a level above
+_STRIP_ROWS = 4                      # the narrow layout's strip: least
+_LIST_ROWS_MIN = 5                   # the list keeps this many rows (three of its own) beside a strip
+_STRIP_SPLIT = 60                    # a strip this wide shows what the row holds beside its details
+_SHAPE_SAMPLE = 400                  # rows of a long list measured for its column sizes
+
+
+@dataclass
+class Trail:
+    """A level above a list, as a column left of it: its rows' labels and
+    values, the one that was opened, and the level's `depth`, which a click on
+    one of its rows hands back (JumpTo)."""
+    labels: list
+    values: list
+    current: Any
+    depth: int
+
+
+@dataclass
+class JumpTo:
+    """select()'s result for a click on a row of a trail column: go back to
+    level `depth` with `value` highlighted."""
+    depth: int
+    value: Any
+
+
+@dataclass
+class Preview:
+    """What select(preview=…) shows for the highlighted row: `details`, a
+    callable (width, height) → lines (or a Pane, with pictures) of its picture
+    and facts, which lays itself out across a wide, short space; `contents`,
+    what opening the row lists, under `contents_title`; `want`, the width its
+    text would like, which the preview's width follows."""
+    details: Any = None
+    contents_title: str = ""
+    contents: list = field(default_factory=list)
+    want: int = 0
+    # The rows the details would like at a width (its picture as wide as the
+    # box): given them first, what it holds getting the rest.
+    details_rows: Any = None
+
+
+def column_widths(total: int, trails: list, preview: Preview | None,
+                  want: int | None = None, list_want: int | None = None) -> tuple[list, int, bool]:
+    """A column browser's layout in `total` columns: (the trail levels that
+    fit with their widths, newest kept, as (trail, width) pairs; the preview's
+    width beside the browser, 0 for none; whether the preview is a strip under
+    it instead). Each is sized to its content: a level by its labels, the
+    preview by `want` (the widest any row of the list would like, so it holds
+    still as you move; else this preview's), the list by `list_want` (its
+    widest row). The list keeps what it needs; the preview goes under it
+    before anything is dropped; levels narrow before the oldest go. Room to
+    spare is shared: the preview gets what it'd like, then the two split the
+    rest evenly, the preview up to its share of the window."""
+    natural = (list_want + 6) if list_want else _COL_MAIN_MIN[1]       # its margin and ›
+    need = max(_COL_MAIN_MIN[0], min(_COL_MAIN_MIN[1], natural))
+    pw = 0
+    if preview is not None and total - _COL_PREVIEW[0] - ui.MARGIN_H - 4 >= need:
+        pw = _COL_PREVIEW[0]
+    room = total - (pw + ui.MARGIN_H if pw else 0) - 4 - need
+    shown = []
+    for t in reversed(trails):
+        tw = min(max(max((ui.visual_len(str(x)) for x in t.labels), default=0) + 3, _COL_TRAIL[0]), _COL_TRAIL[1])
+        if tw + _COL_SEP > room:
+            tw = _COL_TRAIL[0]                    # narrowed, rather than gone
+        if tw + _COL_SEP > room:
+            break
+        shown.insert(0, (t, tw))
+        room -= tw + _COL_SEP
+    if pw:
+        grow = min(room, max(0, (preview.want if want is None else want) + 4 - pw))
+        pw, room = pw + grow, room - grow
+        # The rest split evenly, a half the list doesn't need (its widest row
+        # fits) going to the preview, up to the preview's share of the window.
+        pw += min(max(room // 2, room - max(0, natural - need)), max(0, total * _COL_PREVIEW[1] // 100 - pw))
+    return shown, pw, preview is not None and preview.details is not None and not pw
+
+
+def strip_rows(box_h: int, list_rows: int, useful: int) -> int:
+    """The narrow layout's strip height out of `box_h` rows: the rows the list
+    (`list_rows` long) leaves, else a third, up to what the strip can use; 0
+    when the list would be left fewer than _LIST_ROWS_MIN."""
+    spare = box_h - (list_rows + 4)                   # the list's box: borders, a blank, a "more" line
+    rows = min(max(_STRIP_ROWS, spare if spare > box_h // 3 else box_h // 3), useful)
+    rows = min(max(rows, _STRIP_ROWS), box_h - _LIST_ROWS_MIN)
+    return rows if rows >= _STRIP_ROWS else 0
+
+
+def trail_lines(trail: Trail, width: int, height: int) -> tuple[list, int]:
+    """A trail column's lines, scrolled so the opened row is in view, and the
+    index of its first row (for clicks)."""
+    at = next((n for n, v in enumerate(trail.values) if v == trail.current), 0)
+    top = max(0, min(at - height // 2, len(trail.labels) - height))
+    out = []
+    for n, label in enumerate(trail.labels[top:top + height], top):
+        text = ui.truncate_text(str(label), max(1, width - 2))
+        out.append(ui.on_bar(f" {text}", width, C.BAR_DIM) if n == at else f" {C.DIM}{text}{C.RESET}")
+    return out, top
+
+
+class Pane(list):
+    """A preview column's lines, with pictures to lay over them: (line, col,
+    rows, key, escape, columns), line and col counted from the column's own
+    first line and character, `escape` drawing a picture `rows` × `columns`
+    (an iTerm2 image) with the cursor there. `key` names it: a new key redraws
+    it, as does a write to a cell under it."""
+
+    def __init__(self, lines=(), pictures=()):
+        super().__init__(lines)
+        self.pictures = list(pictures)
+
+
+_columns_on: list = [None]  # None until first read
+
+
+def _columns_off_file():
+    from backbone import app
+    return app.config_dir / "columns_off"
+
+
+def columns_shown() -> bool:
+    """Whether lists that can be a column browser are one (list.columns, v)."""
+    if _columns_on[0] is None:
+        try:
+            _columns_on[0] = not _columns_off_file().exists()
+        except Exception:
+            _columns_on[0] = True
+    return _columns_on[0]
+
+
+def set_columns_shown(shown: bool) -> None:
+    """Column browser or the list alone, and remember it."""
+    _columns_on[0] = shown
+    try:
+        f = _columns_off_file()
+        if shown:
+            f.unlink(missing_ok=True)
+        else:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.touch()
+    except OSError:
+        pass
+
+
+def panel_header(header) -> tuple:
+    """A list's header resolved for this frame: (PanelTitle or None, header lines).
+    `header` may be lines, a callable giving lines, or a PanelTitle (or a
+    callable giving one, for a title that changes). With room for a box, a
+    PanelTitle goes in its border and leaves no lines; without, its own lines."""
+    h = header() if callable(header) and not isinstance(header, PanelTitle) else header
+    if isinstance(h, PanelTitle):
+        return (h, []) if box_fits() else (None, h())
+    return None, h if isinstance(h, Pane) else list(h or [])    # a Pane keeps its pictures
 
 
 def rounded_header(title: str, detail: str = "", right: str = "",
@@ -491,8 +1229,19 @@ def place_help_toggle(out: list, first_row: int, cells: dict, help_key: bool = F
     hints may have been switched since the header was built, and it says
     Ctrl-/ when `?` isn't free); otherwise it is added to the top line,
     `out[0]`. `out[k]` is drawn on row first_row + k."""
+    if not help_toggle_shown():
+        if help_key:
+            cells['__help_key__'] = True             # `?` still toggles here
+        return
     wide = help_toggle_width()
     now, now_w = help_corner_text(help_key)
+    for k, line in enumerate(out[:4]):
+        if now and now in line:                      # drawn as it is now (a box's border): just make it clickable
+            plain = ui.strip_ansi(line)
+            cells[(first_row + k, ui.visual_len(plain[:plain.find(ui.strip_ansi(now))]) + 2)] = HINTS_CLICK
+            if help_key:
+                cells['__help_key__'] = True
+            return
     for k, line in enumerate(out[:4]):
         was = next((" " * (wide - w) + t for t, w in _toggle_variants() if " " * (wide - w) + t in line), None)
         if was is None:
@@ -735,7 +1484,7 @@ def _hint_pin_target() -> int:
     bottom, directly above the now-playing box and status bar, so its keys keep the
     same screen position across redraws (repeated clicks don't chase the bar)."""
     rows = ui.get_terminal_height()
-    return rows - 1 - ui.MARGIN_V - max(ui.footer_height(), ui.MARGIN_V)
+    return rows - 1 - ui.top_margin() - max(ui.footer_height(), ui.MARGIN_V)
 
 
 # Now-playing box transport-icon columns, derived from the one place the glyph
@@ -753,10 +1502,16 @@ def _footer_glyph_cols() -> list[tuple[str, int, int]]:
             for a, (start, width) in zip(actions, ui.FOOTER_GLYPH_COLS)]
 
 
+# What a click on the now-playing box can ask the transport handler for (see
+# prompt.set_transport_handler); anywhere else in the box is 'open'.
+FOOTER_ACTIONS = ('playpause', 'next', 'prev', 'time')
+
+
 def footer_click_action(row: int, col: int) -> str | None:
     """Classify a click against the now-playing box: ``'prev'`` / ``'playpause'``
-    / ``'next'`` on the transport glyphs, ``'open'`` anywhere else in the box, or
-    ``None`` when the click misses it (or no box is shown)."""
+    / ``'next'`` on the transport glyphs, ``'time'`` on the clock when the box
+    says it's clickable, ``'open'`` anywhere else in the box, or ``None`` when
+    the click misses it (or no box is shown)."""
     h = _footer_prev_h[0]
     if h <= 0 or not ui.footer_active():
         return None
@@ -768,6 +1523,9 @@ def footer_click_action(row: int, col: int) -> str | None:
         for action, lo, hi in _footer_glyph_cols():
             if lo <= col <= hi:
                 return action
+        time_cols = ui.footer_time_cols()
+        if time_cols and time_cols[0] <= col <= time_cols[1]:
+            return 'time'
     return 'open'
 
 
@@ -775,7 +1533,8 @@ def render_status_bar():
     """Redraw the bottom status bar in place, saving/restoring the cursor so
     the text input caret doesn't move."""
     rows = ui.get_terminal_height()
-    if rows <= 0:
+    float_tick()
+    if rows <= 0 or not ui.chrome_fits():             # too short a window: its rows are the screen's
         return
     status = ui.get_status_line()
     # \0337 / \0338 (via save_cursor) keep the caret where the text input left
@@ -815,6 +1574,9 @@ class Column:
     gap      : leading gap before this column (defaults to `COL_GAP`, the one
                value every list uses; the pin block's separation from the left
                block is computed per render, so this is only the minimum)
+    scroll   : the column whose text scrolls on the highlighted row when it's
+               cut off (the first, when none says): a number or time before
+               it then holds still
     priority : drop-order when the row is too narrow to show every column
                readably. None (default) = essential, never dropped. A number
                marks the column droppable; the lowest-priority droppable column
@@ -822,12 +1584,12 @@ class Column:
                numbers (e.g. 1 = first to go).
     """
     __slots__ = ('style', 'align', 'flex', 'pin', 'min_width', 'max_width', 'max_frac',
-                 'gap', 'priority')
+                 'gap', 'priority', 'scroll')
 
     def __init__(self, style: str = 'normal', align: str = 'left', flex: bool = False,
                  pin: bool = False, min_width: int = 0, max_width: int | None = None,
                  max_frac: float | None = None, gap: int = COL_GAP,
-                 priority: float | None = None) -> None:
+                 priority: float | None = None, scroll: bool = False) -> None:
         """Build a column spec for a structured select() table."""
         self.style     = style
         self.align     = align
@@ -838,6 +1600,7 @@ class Column:
         self.max_frac  = max_frac
         self.gap       = gap
         self.priority  = priority
+        self.scroll    = scroll
 
 
 def _cell_text(cell) -> tuple[str, str | None]:
@@ -1086,7 +1849,7 @@ def _render_table_row(cells: list, columns: list, is_current: bool,
             return left + " " * gap + right + " " * right_margin
         return left
 
-    pointer = f"{C.ACCENT}›{C.RESET}" if is_current else " "
+    pointer = " "                       # the highlighted row is a bar (select), not a pointer
     if is_checked is None:
         left = f"  {pointer}"
     else:
@@ -1222,6 +1985,13 @@ def _byte_ready(fd: int, timeout: float) -> bool:
         return False
 
 
+# Function keys: F1-F4 as ESC O P..S (or ESC [ 1;… P..S with a modifier),
+# F1-F12 as ESC [ n ~ (11-14 on some terminals for F1-F4).
+_SS3_FKEYS = {'P': 'F1', 'Q': 'F2', 'R': 'F3', 'S': 'F4'}
+_CSI_FKEYS = {'11': 'F1', '12': 'F2', '13': 'F3', '14': 'F4', '15': 'F5', '17': 'F6', '18': 'F7',
+              '19': 'F8', '20': 'F9', '21': 'F10', '23': 'F11', '24': 'F12'}
+
+
 def _read_key_raw(fd: int) -> str:
     """Read and decode one raw keypress, including escape sequences and mouse
     events, into a named key string."""
@@ -1233,6 +2003,8 @@ def _read_key_raw(fd: int) -> str:
                 'H': 'UP', 'P': 'DOWN', 'K': 'LEFT', 'M': 'RIGHT',
                 'G': 'HOME', 'O': 'END', 'I': 'PGUP', 'Q': 'PGDN', 'S': 'DELETE',
                 'R': 'INSERT',
+                **{chr(59 + n): f'F{n + 1}' for n in range(10)},   # F1-F10: ; < = … D
+                '\x85': 'F11', '\x86': 'F12',
             }.get(ext, '')
         if ch == '\r': return 'ENTER'
         if ch == '\x08': return 'BACKSPACE'
@@ -1257,7 +2029,7 @@ def _read_key_raw(fd: int) -> str:
                 # application-cursor mode.
                 ss3 = os.read(fd, 1).decode('utf-8', errors='replace')
                 return {'A': 'UP', 'B': 'DOWN', 'C': 'RIGHT', 'D': 'LEFT',
-                        'H': 'HOME', 'F': 'END'}.get(ss3, 'ESC')
+                        'H': 'HOME', 'F': 'END', **_SS3_FKEYS}.get(ss3, 'ESC')
             if ch2 == b'[':
                 ch3 = os.read(fd, 1)
                 seq = ch3.decode('utf-8', errors='replace')
@@ -1307,16 +2079,18 @@ def _read_key_raw(fd: int) -> str:
                                 break
                     if term.isalpha():
                         return {'A': 'UP', 'B': 'DOWN', 'C': 'RIGHT', 'D': 'LEFT',
-                                'H': 'HOME', 'F': 'END'}.get(term, 'ESC')
+                                'H': 'HOME', 'F': 'END', **_SS3_FKEYS}.get(term, 'ESC')
                     return {'1': 'HOME', '2': 'INSERT', '3': 'DELETE', '4': 'END',
                             '5': 'PGUP', '6': 'PGDN', '7': 'HOME', '8': 'END',
-                            }.get(num, 'ESC')
+                            **_CSI_FKEYS}.get(num, 'ESC')
                 mapped = {
                     'A': 'UP', 'B': 'DOWN', 'C': 'RIGHT', 'D': 'LEFT',
                     'H': 'HOME', 'F': 'END',
                     'Z': 'BACKTAB',                       # Shift+Tab
                     'I': 'FOCUS_IN', 'O': 'FOCUS_OUT',
                 }.get(seq, 'ESC')
+                if mapped in ('FOCUS_IN', 'FOCUS_OUT'):
+                    ui.set_window_focused(mapped == 'FOCUS_IN')
                 if mapped == 'FOCUS_IN':
                     # Regained focus: force the now-playing box to repaint (it may
                     # be stale from a background change while we were unfocused).
@@ -1353,7 +2127,7 @@ def _visible_rows() -> int:
     # Reserve the status-bar row, plus the now-playing box's rows whenever
     # background audio is active, so lists never collide with it.
     reserve = 1 + ui.footer_height()
-    return max(4, rows - reserve - 2 * ui.MARGIN_V)
+    return max(4, rows - reserve - ui.top_margin() - ui.MARGIN_V)
 
 
 def _rows() -> int:
@@ -1391,6 +2165,9 @@ class _Widget:
         self.row     = None   # anchor row, 1-based
         self.last_h  = 0
         self._full   = False  # whether we own the full screen
+        # Pictures laid over the frame (Pane.pictures): (row, col, rows, key,
+        # escape) on screen, and the ones last drawn.
+        self.pictures: list = []
 
     def anchor_reset(self) -> None:
         """Called on resize (or after another view owned the screen): clears and
@@ -1408,13 +2185,14 @@ class _Widget:
         restamped on every keystroke.
         """
         mv   = ui.MARGIN_V
+        top  = ui.top_margin()
         rows = ui.get_terminal_height()
 
         # Wrap content with vertical margins: mv blank rows on top, mv reserved
         # rows before the status bar at the bottom. The box's band is excluded so
         # the two writers never own the same row (a shrinking box would otherwise
         # blank rows this diff believes it still owns).
-        padded: list[str] = [''] * mv + list(lines)
+        padded: list[str] = [''] * top + list(lines)
         limit = rows - 1 - max(mv, footer_height_for_layout())
         padded = padded[:max(0, limit)]
 
@@ -1441,9 +2219,30 @@ class _Widget:
         # one flush, but each row still only costs anything if it changed.
         frame[rows] = ui.get_status_line()
         frame = _takeover_rows(frame)
+        # A picture that changed or went (this screen's, or the one before
+        # it, which this one took over): its cells repaint, which wipes it.
+        drawn = [(p[0], p[1], p[2], p[3], *p[5:]) for p in self.pictures]
+        shown = [(p[0], p[1], p[2], p[3], *p[5:]) for p in _shown_pictures]
+        if drawn != shown:
+            for r, c, n, _k, *size in shown + drawn:
+                if size:
+                    screen_forget_cells(r, r + n - 1, c, c + size[0] - 1)
+                else:
+                    screen_forget_rows(r, r + n - 1)
         parts = [C.HIDE]
+        painted = set()
         for row in sorted(frame):
-            parts.append(screen_row_segment(row, frame[row]))
+            seg = screen_row_segment(row, frame[row])
+            if seg:
+                painted.add(row)
+            parts.append(seg)
+        # Then the pictures, where cells under them were just written (that
+        # erases them) or they changed.
+        for r, c, n, _k, esc, *size in self.pictures:
+            last = c + (size[0] if size else 10 ** 6) - 1
+            if any(screen_painted(row, c, last) for row in range(r, r + n) if row in painted):
+                parts.append(f"\0337\033[{r};{c}H{esc}\0338")
+        _shown_pictures[:] = self.pictures
         parts.append(footer_box_segment())
         out = "".join(p for p in parts if p)
         if out != C.HIDE:
@@ -1465,6 +2264,7 @@ class _Widget:
 
 
 _register_screen_hooks()
+ui.set_tab_keys_shown(lambda: hints_visible())
 
 
 hint = _hint   # the public name for the hint bar

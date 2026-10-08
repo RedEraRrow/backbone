@@ -1416,16 +1416,18 @@ def timezone_select(initial_offset: str = "") -> str | None:
         hint_line_count = len(_prompt.chrome_hint_lines(_tz_pairs))
 
         # Map fills remaining rows; search line is always 1 slot (blank when empty)
-        fixed_rows = 1 + 1 + MAX_ZONE_ROWS + hint_line_count  # strip + search + zones + hints
+        boxed = _prompt.box_fits()
+        # strip + search + zones + hints, and the box's top and bottom
+        fixed_rows = 1 + 1 + MAX_ZONE_ROWS + hint_line_count + (2 if boxed else 1)
         if not search_str:
             lines.insert(1, "")  # blank placeholder keeps map stable
         map_rows = max(4, rows - fixed_rows)
-        map_cols = cols
+        map_cols = cols - (4 if boxed else 0)                # inside the box
 
         map_lines = _render_world_map(oh, om, tzs, map_cols, map_rows, cur_tz_idx)
         lines.extend(map_lines)
 
-        _prompt.append_chrome(lines, _tz_pairs, _hint_cells)
+        lines, _dx = _prompt.boxed_chrome(lines, "Time zone", _tz_pairs, _hint_cells)
         w.render(lines)
 
     _hint_cells: dict = {}   # clickable hint keys, filled by append_chrome

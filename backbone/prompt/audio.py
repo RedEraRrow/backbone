@@ -8,8 +8,9 @@ from backbone.prompt.core import (
 from backbone import keys, ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt.chrome import (
-    append_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse,
+    boxed_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse,
 )
+from backbone.prompt.core import box_fits
 from backbone.prompt.text import text
 from backbone.prompt.core import C
 
@@ -89,11 +90,9 @@ def _eq_fmt_freq(freq: float) -> str:
 def _eq_render_lines(bands: list, cursor: int, message: str, status: str,
                      cols: int, rows: int, show_curve: bool = True) -> list[str]:
     """Render the graphic-EQ plot: vertical bands from a 0 dB baseline, a dim
-    response curve through the band tops, dB axis and frequency labels."""
-    out = [
-        f"  {C.DIM}{message}{C.RESET}",
-        f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}",
-    ]
+    response curve through the band tops, dB axis and frequency labels. Two
+    rows of `rows` are left for the box's borders (boxed_chrome titles it)."""
+    out = []
     n = len(bands)
     plot_w = max(10, cols - 5)              # 4 cols for the dB label + 1 gap
     avail = rows - 9
@@ -208,11 +207,9 @@ def _rva2_render_lines(gain: float, message: str, avail: int | None = None) -> l
       Cut rows  (db < 0): bar fills downward; ▀ lights first (top half, at gain ≤ db+0.5),
                            then █ when gain ≤ db.
     Every 0.5 dB step changes a visible half-block, so no increment is invisible.
+    The box around it (boxed_chrome) carries `message`.
     """
-    out = [
-        f"  {C.DIM}{message}{C.RESET}",
-        f"{C.DIM}{'─' * 20}{C.RESET}",
-    ]
+    out = []
 
     # One row per dB is the ideal, but the meter must still fit above the hint
     # bar and the now-playing box: on a short terminal it would otherwise run off the
@@ -280,7 +277,7 @@ def rva2_edit(message: str = "Volume adjustment:", gain: float = 0.0) -> float |
         _avail = _hint_pin_target() - 4 - len(chrome_hint_lines(_pairs))
         lines = _rva2_render_lines(gain, message, avail=_avail)
         lines.append(f"  {C.ACCENT}▸{C.RESET} {C.BOLD}{gain:+.1f} dB{C.RESET}")
-        append_chrome(lines, _pairs, _hint_cells)
+        lines, _dx = boxed_chrome(lines, message, _pairs, _hint_cells)
         w.render(lines)
 
     result = None
@@ -362,6 +359,11 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
     old = _get_term_attrs(fd)
     w = _Widget(fd)
     _hint_cells: dict = {}   # clickable hint keys, filled by append_chrome
+    _dx = [0]                # how far right the box moved the plot (boxed_chrome)
+
+    def _plot_cols() -> int:
+        """The width the plot is laid out in: inside the box, when there is one."""
+        return _cols() - (4 if box_fits() else 0)
 
     def _clamp(g: float) -> float:
         return max(-_EQ_GAIN_MAX, min(_EQ_GAIN_MAX, g))
@@ -388,9 +390,9 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
                   (L("levels.delete", most=1), "delete"), (L("levels.zero"), "zero"), (L("levels.flat"), "flat"),
                   (L("levels.preset"), "preset"), (L("levels.save"), "save"), (L("levels.back"), "back"),
                   (L("list.quit"), "quit app")]
-        lines = _eq_render_lines(bands, cursor, message, status, _cols(),
+        lines = _eq_render_lines(bands, cursor, message, status, _plot_cols(),
                                  _hint_pin_target() - len(chrome_hint_lines(_pairs)))
-        append_chrome(lines, _pairs, _hint_cells, help_key=True)
+        lines, _dx[0] = boxed_chrome(lines, message, _pairs, _hint_cells, help_key=True)
         w.render(lines)
 
     result = None
@@ -458,7 +460,7 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
             elif act == 'levels.add':
                 _restore_term_attrs(fd, old)
                 disable_mouse()
-                freq_str = text("Add band frequency (Hz):")
+                freq_str = text("Band frequency in Hz:")
                 _set_raw(fd)
                 enable_mouse()
                 screen_takeover_next()   # paint over the previous screen, no flash
@@ -481,8 +483,8 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
             elif key.startswith('MOUSE_CLICK:') and n:
                 parts = key.split(':')
                 col = int(parts[3]) if len(parts) > 3 else 1
-                plot_w = max(10, _cols() - 5)
-                x = col - 5  # the 3-col dB label + a space; the plot starts at col 5
+                plot_w = max(10, _plot_cols() - 5)
+                x = col - 5 - _dx[0]  # the 3-col dB label + a space; the plot starts at col 5, then the box's shift
                 if 0 <= x < plot_w:
                     bx = _eq_band_x(n, plot_w)
                     cursor = min(range(n), key=lambda i: abs(bx[i] - x))

@@ -77,3 +77,21 @@ class StaleHeaderToggleTest(unittest.TestCase):
                 self.assertIn("hide help" if shown else "] help", plain[1])
                 self.assertEqual(pc.ui.visual_len(plain[1]), pc.ui.visual_len(plain[0]))
                 self.assertNotIn("help", plain[0])                    # nothing on the border
+
+
+class HelpToggleSwitchTest(unittest.TestCase):
+    def test_switched_off_the_toggle_is_not_drawn_but_question_mark_still_works(self):
+        from backbone.prompt import core as pc
+        saved = pc._toggle_shown[0]
+        try:
+            pc._toggle_shown[0] = False
+            self.assertEqual(pc.help_corner_text(), ("", 0))
+            self.assertEqual(pc.help_toggle_width(), 0)
+            cells: dict = {}
+            self.assertEqual(pc.add_help_corner("Title", 1, cells, help_key=True), "Title")
+            self.assertEqual(cells, {'__help_key__': True})          # ? still toggles there
+            self.assertNotIn("help", "".join(pc.rounded_header("Song", " · Artist", "MP3")))
+            pc._toggle_shown[0] = True
+            self.assertIn("help", "".join(pc.rounded_header("Song", " · Artist", "MP3")))
+        finally:
+            pc._toggle_shown[0] = saved

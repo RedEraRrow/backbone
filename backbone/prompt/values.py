@@ -8,7 +8,7 @@ from backbone.prompt.core import (
 from backbone import keys, ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
-from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _with_toggle_hint, append_chrome, consume_chrome, disable_mouse, enable_mouse
+from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _with_toggle_hint, boxed_chrome, consume_chrome, disable_mouse, enable_mouse
 from backbone.prompt.core import C
 
 
@@ -76,9 +76,6 @@ def fraction_edit(message: str = "Edit metadata pair:",
     def _render():
         lines = []
 
-        lines.append(f"  {C.DIM}{message}{C.RESET}")
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
-
         row = "  "
         for i, field in enumerate(field_order):
             if i > 0:
@@ -98,10 +95,9 @@ def fraction_edit(message: str = "Edit metadata pair:",
                 row += f" {C.DIM}(varies){C.RESET}"
 
         lines.append(row)
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
 
         # No q: these fields take text, so q is a letter here.
-        append_chrome(lines, _with_toggle_hint(
+        lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(
             [("↵", "save"), ("tab/⇧tab", "field"), ("esc", "back")]), _hint_cells)
         w.render(lines)
 
@@ -232,9 +228,6 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
     def _render():
         lines = []
 
-        lines.append(f"  {C.DIM}{message}{C.RESET}")
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
-
         row = "  "
         for i, field in enumerate(field_order):
             value = "".join(fields[field])
@@ -255,8 +248,7 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
                 row += "."
 
         lines.append(row)
-        lines.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
-        append_chrome(lines, _with_toggle_hint(
+        lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(
             [('↵', 'save'), ('tab/⇧tab', 'field'),
              ('esc', 'back'), (keys.label('list.quit'), 'quit app')]), _hint_cells)
         w.render(lines)
@@ -304,7 +296,7 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
                     result = f"{h}:{m}:{s}.{ms}"
                     break
                 else:
-                    ui.show_status("Invalid time (need hours < 24, minutes/seconds < 60)")
+                    ui.show_status("Hours go up to 23, minutes and seconds up to 59.")
             elif key in ('ESC', 'CTRL_C'):      # Ctrl-C cancels, as in every widget
                 break
             elif keys.pressed(key, 'list.quit'):
@@ -378,11 +370,9 @@ def number_edit(message: str = "Edit number:", *, value: int = 0,
         unit_s = f" {unit}" if unit else ""
         bounds = f"min {minimum}" + ("" if maximum is None else f", max {maximum}")
         lines = [
-            f"  {C.DIM}{message}{C.RESET}",
-            "",
             f"  {C.ACCENT}▸{C.RESET} {C.BOLD}{shown}{C.RESET}{C.DIM}{unit_s}{C.RESET}   {C.DIM}({bounds}){C.RESET}",
         ]
-        append_chrome(lines, _with_toggle_hint(
+        lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(
             [("↑↓", "±1"), ("⇞⇟", "±10"),
              ("↵", "save"), ("esc", "back"), (keys.label("list.quit"), "quit app")]),
                       _hint_cells, help_key=True)
@@ -494,8 +484,6 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
             return f"{C.BOLD}{text}{C.RESET}" if field == i else f"{C.DIM}{text}{C.RESET}"
 
         lines = [
-            f"  {C.DIM}{message}{C.RESET}",
-            "",
             f"  {_mark(0)} {_lab(0, 'Rating')}   {filled}{empty}  {C.DIM}{rlabel}{C.RESET}",
             f"  {_mark(1)} {_lab(1, 'Plays ')}   {cshown}",
             f"  {_mark(2)} {_lab(2, 'Rater ')}   {rater}",
@@ -505,7 +493,7 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
         pairs = [("tab/⇧tab", "field")]
         pairs += {0: [("←→", "stars")], 1: [("←→", "±1"), ("⇞⇟", "±10")]}.get(field, [])
         pairs += [("↵", "save"), ("esc", "back")] + ([(keys.label("list.quit"), "quit app")] if field != 2 else [])
-        append_chrome(lines, pairs, _hint_cells)
+        lines, _dx = boxed_chrome(lines, message, pairs, _hint_cells)
         w.render(lines)
 
     result = None

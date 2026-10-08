@@ -3,18 +3,22 @@
 from __future__ import annotations
 import re
 import sys
+import textwrap
+import time
 from typing import Any, Callable, Literal, overload
 from backbone.prompt.core import (
     _COLUMNS_MAX_WIDTH, _EDGE_MARGIN, _get_term_attrs, _set_raw, _restore_term_attrs,
     _wait_for_keypress, _table_widths, _render_table_row, _clip_ansi, _norm, block_cursor,
     _read_key, _visible_rows, _cols, _Widget, _hint_pin_target, screen_takeover_next,
-    Choice, Column, rounded_header,
+    Choice, Column, JumpTo, PanelTitle, Trail, border_right, box_fits, box_lines, boxed_frame, column_widths,
+    COL_GAP, _COL_MAIN_MIN, _COL_PREVIEW, _LIST_ROWS_MIN, _SHAPE_SAMPLE, _STRIP_SPLIT, strip_rows,
+    columns_shown, help_corner_text, panel_header, rounded_header, set_columns_shown, trail_lines,
 )
 from backbone import keys, ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import (
-    append_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, move_hint, _plain,
+    append_chrome, boxed_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, move_hint, _plain,
 )
 from backbone.prompt.core import C
 from backbone.prompt.core import edit_line
@@ -86,6 +90,7 @@ keys.define("list", "Lists", [
     ("sections", ("/",), "a long list's sections, or the whole list"),
     ("row_options", ("o",), "everything you can do with the row"),
     ("list_options", ("O",), "everything you can do with the whole list"),
+    ("columns", ("v",), "side columns on or off (lists that have them)"),
 ])
 # The live search lists: typing goes into the query, so their keys are the
 # ones that can't be typed.
@@ -135,7 +140,7 @@ def options_menu(title: str, entries: list) -> Any:
     choices = [Choice(title=label, value=i, cells=[label, key_text])
                for i, (label, key_text, _v) in enumerate(entries)]
     i = select("", choices, columns=[Column(style='primary'), Column(style='dynamic-dim', flex=True)],
-               header=lambda: rounded_header(title or "Options", "", "options"))
+               header=PanelTitle(title or "Options", "options"))
     return None if i is None else entries[i][2]
 
 
@@ -249,6 +254,8 @@ def _select_flat(message: str, choices: list, *,
            list_actions: dict[str, Callable[[], Any]] | None = None,
            list_action_hints: dict[str, str] | None = None,
            choose_label: str | None = None,
+           trail: list | None = None,
+           preview: Callable[[Any], Any] | None = None,
            ) -> Any:
     """Arrow keys to navigate; Enter / → to confirm; ← / b / Esc → None; q quits the app.
 
@@ -312,6 +319,14 @@ def _select_flat(message: str, choices: list, *,
             ends the list with that.
         choose_label: what ↵ does to a row ("Play", "Open"), for the top of
             the row's options menu.
+        trail:      the levels above this list (Trail, oldest first): with
+            preview, the list becomes a column browser, its box holding them
+            as columns left of the list, as many as fit. A click on a row of
+            one returns JumpTo(its depth, the row's value).
+        preview:    highlighted row's value → None or a callable (width,
+            height) → lines (or a Pane, with pictures) for the last column:
+            what the row holds, or its details. column_widths sizes the
+            columns; list.columns (v) turns the browser off and on.
 
     Options menus: list.row_options (o) lists everything that can be done
     with the highlighted row (↵, on_inspect, the row actions that apply),
@@ -428,6 +443,8 @@ def _select_flat(message: str, choices: list, *,
         _opt_hints[L("list.row_options")] = "options"
     if _list_specs or _list_act_specs:
         _opt_hints[L("list.list_options")] = "list options"
+    if trail or preview is not None:
+        _opt_hints[L("list.columns")] = "columns"
     combined_hints = {**{k: v for k, v in combined_hints.items() if k not in base_hints},
                       **_opt_hints, **base_hints}
 
@@ -471,6 +488,9 @@ def _select_flat(message: str, choices: list, *,
                           **{k: v for k, v in combined_hints.items() if k != row_edit_key}}
 
     _last_hlen = [0]
+    _col_geo: list = [None]  # the column browser's last layout, for clicks (see _lines)
+    _scrolling = [False]          # the highlighted row is cut off and scrolls: redraw it as it moves
+    _scrolled_at = [0.0]
     # Maps a visible item index → its ANSI-stripped rendered text, so a mouse
     # click can tell whether it landed on a printed character or blank space.
     _row_plain: dict[int, str] = {}
@@ -478,10 +498,6 @@ def _select_flat(message: str, choices: list, *,
     # bright glyph should replay through the normal key handling below.
     _hint_cells: dict[tuple[int, int], str] = {}
 
-    def _header_lines() -> list[str]:
-        if header is None:
-            return []
-        return header() if callable(header) else list(header)
 
     def _help_key_free() -> bool:
         """Whether `?` can toggle the hints here: not bound by this list, and
@@ -511,16 +527,142 @@ def _select_flat(message: str, choices: list, *,
         return head + [(text[:_edit_pos], 'primary'), (text[_edit_pos], 'cursor'),
                        (text[_edit_pos + 1:], 'primary')]
 
+    def _details(pv, width: int, height: int) -> list:
+        """The preview's details drawn `width` × at most `height`."""
+        return pv.details(width, height) if pv.details is not None and height > 0 and width > 0 else []
+
+    def _place_pictures(lines, line0: int, col0: int) -> None:
+        """Put `lines`' pictures on screen: lines[k] on out[line0 + k] (render()
+        lays out[j] at screen row 1 + top_margin() + j), its column 0 at col0."""
+        for line, col, rows, key, esc, *size in getattr(lines, 'pictures', ()):
+            w.pictures.append((1 + ui.top_margin() + line0 + line, col0 + col, rows, key, esc, *size))
+
+    _shape: list = [None]
+
+    def _level_shape() -> tuple[int, int, int]:
+        """(the preview width, the contents rows, the list's own width) its
+        rows would like at most: worked out once for the list (its longest
+        rows sampled), so the columns hold still as you move through it and
+        change only at another level."""
+        if _shape[0] is None:
+            live = [it for it in items if not it.disabled]
+            step = max(1, len(live) // _SHAPE_SAMPLE)    # ponytail: a sample of a huge list, not all of it
+            sample = live[::step]
+            pvs = [p for p in (preview(it.value) for it in sample) if p is not None] if preview else []
+            wide = max((sum(ui.visual_len(str(c)) for c in it.cells) + COL_GAP * (len(it.cells) - 1)
+                        if it.cells else ui.visual_len(ui.strip_ansi(str(it.title))) for it in sample), default=0)
+            _shape[0] = (max((p.want for p in pvs), default=0), max((len(p.contents) for p in pvs), default=0), wide)
+        return _shape[0]
+
+    def _clear_of_tab(pw: int, trails_w: int) -> int:
+        """The preview's width moved a few columns, if need be, so the edge
+        between the browser's box and the preview's isn't under the showing
+        tab (whose outline opens into the box under it: ui.tab_notch); the
+        shorter way, as far as both keep their least. Else as it was."""
+        notch = ui.tab_notch() if pw else None
+        if not notch:
+            return pw
+        a, b = notch
+        mh = ui.MARGIN_H
+        right = mh + _cols() - pw - mh - 1                   # the browser box's right corner, 0-based
+        if b <= right or a >= right + mh + 1:
+            return pw
+        fits = []
+        if pw - (b - right) >= _COL_PREVIEW[0]:              # the edge right of the tab: the browser's
+            fits.append(pw - (b - right))
+        move = right - (a - mh - 1)                          # the preview's corner at the tab's left side
+        if _cols() - pw - move - mh - 4 - trails_w >= _COL_MAIN_MIN[0]:
+            fits.append(pw + move)
+        return min(fits, key=lambda w: abs(w - pw)) if fits else pw
+
+    def _contents_box(pv, width: int, height: int, title: bool = True) -> list:
+        """What the highlighted row holds, in a box `width` × `height`."""
+        room = height - 2
+        rows = [f"{C.DIM}{ui.truncate_text(str(x), width - 4)}{C.RESET}" for x in pv.contents[:room]]
+        if len(pv.contents) > room > 0:
+            rows[-1] = f"{C.DIM}… {len(pv.contents) - room + 1} more{C.RESET}"
+        return box_lines(rows, width, height, pv.contents_title if title else "", focused=False)
+
+    def _preview_column(pv, pw: int, height: int, browser_w: int, first: int) -> list:
+        """The preview beside the browser: its details in one box over what
+        it holds in another, together `height` rows."""
+        inner, col0 = pw - 4, 1 + ui.MARGIN_H + browser_w + ui.MARGIN_H + 2
+        # What the rows hold gets the rows the most any of them needs, up to
+        # half: the same for every row, so the picture above doesn't resize.
+        most = _level_shape()[1]
+        held = max(5, min(most + 2, height // 2)) if most else 0
+        if most and pv.details_rows is not None:      # the details' picture as wide as the box first
+            held = max(5, height - (pv.details_rows(inner) + 2))
+        det = _details(pv, inner, height - 2 - held)
+        det_h = len(det) + 2 if det else 0
+        if not most or height - det_h < 3:
+            det, det_h = (_details(pv, inner, height - 2) if not det else det), height
+        _place_pictures(det, first, col0)
+        out = box_lines(det, pw, det_h, focused=False) if det_h else []
+        if det_h < height:
+            out += _contents_box(pv, pw, height - det_h)
+        return out
+
+    def _preview_strip(pv, height: int, line0: int) -> list:
+        """The preview in a narrow window: its details in a strip under the
+        browser, `height` rows, its first line out[line0]."""
+        total = _cols()
+        # What it holds beside the details, when there's room for both.
+        cw = (total - ui.MARGIN_H) * 2 // 5 if pv.contents and total >= _STRIP_SPLIT else 0
+        dw = total - (cw + ui.MARGIN_H if cw else 0)
+        det = _details(pv, dw - 4, height - 2)
+        _place_pictures(det, line0 + 1, 1 + ui.MARGIN_H + 2)
+        left = box_lines(det, dw, height, focused=False)
+        if not cw:
+            return left
+        return [a + b for a, b in zip(left, _contents_box(pv, cw, height))]
+
+    def _browser_rows(body, shown, main_in, height, first, lead) -> list:
+        """The column browser's rows inside its box: the levels above that fit
+        (`shown`: (trail, width)), then the list (`body`, its rows' margin
+        dropped), the levels' rows level with the list's (`lead` lines down).
+        Records where each column landed (_col_geo), for clicks."""
+        sep = f" {C.DIM}│{C.RESET} "
+        x = 1 + ui.MARGIN_H + 2                  # the screen column inside "│ "
+        trails, columns = [], []
+        for t, tw in shown:
+            lines, top = trail_lines(t, tw, height - lead)
+            trails.append((x, x + tw - 1, top - lead, t.values, t.depth, lead))
+            columns.append(([""] * lead + lines, tw))
+            x += tw + 3
+        main = (x, x + main_in - 1)
+        columns.append(([ln[ui.MARGIN_H:] if ln.startswith(" " * ui.MARGIN_H) else ln for ln in body], main_in))
+        _col_geo[0] = {'first': first, 'main': main, 'trails': trails}
+
+        def cell(lines, k, width):
+            text = _clip_ansi(lines[k], width) if k < len(lines) else ""
+            return text + C.RESET + " " * max(0, width - ui.visual_len(text))
+        return [sep.join(cell(lines, k, width) for lines, width in columns) for k in range(height)]
+
     def _lines():
         nonlocal viewport
-        cols    = _cols()
+        # Boxed when the window has room: a PanelTitle header becomes the box's
+        # title, any other header stays above the box.
+        boxed = box_fits()
+        ptitle, h_lines = panel_header(header)
+        _scrolling[0] = False
+        # A column browser, when there's room: the levels above and the preview
+        # share the box with the list, which gets what's left.
+        shown, pw, strip, pview, strip_h = [], 0, False, None, 0
+        if boxed and (trail or preview is not None) and columns_shown() and items:
+            pview = preview(items[cursor].value) if preview is not None else None
+            shape = _level_shape()
+            shown, pw, strip = column_widths(_cols(), trail or [], pview,
+                                             shape[0] if preview is not None else None, shape[2])
+        pw = _clear_of_tab(pw, sum(tw + 3 for _t, tw in shown))
+        browser_w = _cols() - (pw + ui.MARGIN_H if pw else 0)       # the browser's box
+        main_in = browser_w - 4 - sum(tw + 3 for _t, tw in shown)   # the list's own column
+        cols    = main_in + 2 if boxed else _cols()  # rows lose their 2-space margin inside the box
         # Refresh the now-playing box height up front so this frame's row budget
         # (vis) and hint pinning match the box that render() will actually draw;
         # otherwise a just-appeared box paints over the pinned hints until the
         # next redraw (hints missing until you click/navigate).
         ui.footer_lines(ui.get_terminal_width())
-        h_lines = _header_lines()
-        _last_hlen[0] = len(h_lines)
         _row_plain.clear()
 
         max_header_w = 0
@@ -538,18 +680,65 @@ def _select_flat(message: str, choices: list, *,
         # at the end of this function: they must agree or the list mis-sizes.
         hints_now  = _edit_hints if _edit_on else combined_hints
         hint_lines = chrome_hint_lines(hints_now, extra=layout_constraint)
+        # A header over the list (a file's details, a picture: more than a
+        # title's one line) goes in a window too short to keep it and
+        # _LIST_ROWS_MIN rows of the list; it's back when the window grows.
+        if len(h_lines) > 1 and (_hint_pin_target() - len(h_lines) - len(hint_lines) - (4 if boxed else 2)
+                                 < min(len(items), _LIST_ROWS_MIN)):
+            h_lines = []
 
-        # Non-item lines this widget emits: header + message + the two
-        # above/below indicator rows (always present) + hints.
-        fixed_overhead = len(h_lines) + len(hint_lines) + 3
-        vis     = max(2, _visible_rows() - fixed_overhead)
+        # Lines inside the box (or under the header) before the rows: a panel's
+        # subtitle, then the message, which a panel only shows when it says something.
+        # Boxed, the panel's title (else the message) and its subtitle are in
+        # the box's top border; unboxed, the message is a line over the rows.
+        pre = [] if boxed or not message.strip() else [f"  {C.DIM}{message}{C.RESET}"]
+        box_title = ptitle.title if ptitle else message.strip().rstrip(":")
+        # Under a panel's title, a message that says more than a label
+        # ("Albums:") joins its subtitle in the border: a section's name.
+        said = message.strip() if ptitle and message.strip() and not message.strip().endswith(":") else ""
+        box_right = border_right(" · ".join(x for x in ((ptitle.subtitle if ptitle else None), said) if x),
+                                 _help_key_free() if not h_lines else None)
+        if boxed:
+            # The box runs from under any header down to the hint bar.
+            box_h = max(4, _hint_pin_target() - len(h_lines) - len(hint_lines))
+            if strip:                                           # the preview's strip, under the box
+                inner = _cols() - 4
+                det_rows = pview.details_rows(inner) if pview.details_rows else len(_details(pview, inner, box_h))
+                strip_h = strip_rows(box_h, len(items) + len(pre), max(det_rows, min(len(pview.contents), 12)) + 2)
+            box_h -= strip_h
+            vis = max(2, box_h - 2 - len(pre) - 2)
+        else:
+            # Non-item lines this widget emits: header + message + the two
+            # above/below indicator rows (always present) + hints.
+            fixed_overhead = len(h_lines) + len(hint_lines) + 3
+            vis     = max(2, _visible_rows() - fixed_overhead)
 
         n       = len(items)
-        viewport = _scroll(viewport, cursor, vis, items)
+        # The "N above" row only once the list has scrolled: till then the
+        # first row sits right under the border (or the message).
+        viewport = _scroll(viewport, cursor, vis + 1, items)
+        if viewport > 0:
+            viewport = _scroll(viewport, cursor, vis, items)
+        else:
+            vis += 1
 
-        out = h_lines[:]
-        out.append(f"  {C.DIM}{message}{C.RESET}")
-        out.append(f"  {C.DIM}╵ {viewport} above{C.RESET}" if viewport > 0 else "")
+        out = pre[:]
+        if viewport > 0:
+            out.append(f"  {C.DIM}╵ {viewport} above{C.RESET}")
+        # A row of a list whose rows open something carries a › at its right.
+        opens = choose_label == "Open"
+        row_room = cols - ui.MARGIN_H - (2 if opens else 0)
+
+        def _row(text: str, i: int, current: bool) -> str:
+            """A row (`text`, its margin already off) fitted to the list's
+            width: the › of a row that opens, and the highlight bar on the
+            highlighted one."""
+            text = _clip_ansi(text, row_room)
+            text += " " * max(0, row_room - ui.visual_len(text))
+            if opens:
+                text += f" {C.DIM}›{C.RESET}" if not items[i].disabled else "  "
+            return " " * ui.MARGIN_H + (ui.on_bar(text, row_room + (2 if opens else 0)) if current else text)
+        row_at: dict[int, int] = {}              # item index → its line in `out`
 
         # Structured columns: compute table widths once from each item's cells.
         # Rows without cells (headings/separators) fall back to plain rendering.
@@ -557,15 +746,23 @@ def _select_flat(message: str, choices: list, *,
         col_widths: list[int] = []
 
         def _cells_of(i: int) -> list:
-            """A row's cells, with the edited one swapped in while it is live."""
+            """A row's cells, with the edited one swapped in while it is live,
+            and the highlighted row's scrolling cell (Column.scroll, else the
+            first) moving through its text when it's cut off."""
             cells = items[i].cells
+            at = next((k for k, c in enumerate(columns or []) if c.scroll), 0)
             if _edit_on and i == cursor and cells and 0 <= row_edit_col < len(cells):
                 cells = list(cells)
                 cells[row_edit_col] = _edit_cell()
+            elif i == cursor and cells and len(col_widths) > at and len(cells) > at \
+                    and isinstance(cells[at], str) and ui.visual_len(cells[at]) > col_widths[at] > 0:
+                cells = list(cells)
+                cells[at] = ui.marquee(cells[at], col_widths[at], time.monotonic())
+                _scrolling[0] = True
             return cells
 
         if columns:
-            eff = min(cols, _COLUMNS_MAX_WIDTH)
+            eff = min(ui.MARGIN_H + row_room, _COLUMNS_MAX_WIDTH)
             rows_cells = [_cells_of(i) for i in range(len(items)) if items[i].cells]
             vis_cells = [_cells_of(i) for i in range(viewport, min(viewport + vis, len(items)))
                          if items[i].cells]
@@ -574,43 +771,65 @@ def _select_flat(message: str, choices: list, *,
                                        visible_cells=vis_cells)
 
         for i in range(viewport, min(viewport + vis, n)):
+            current = i == cursor and not items[i].disabled
             if columns and items[i].cells:
-                out.append(_render_table_row(
+                line = _render_table_row(
                     _cells_of(i), columns, i == cursor, col_widths, eff, _EDGE_MARGIN,
                     is_checked=items[i].checked if multi else None,
-                    disabled=items[i].disabled))
-                _row_plain[i] = _plain(out[-1])
+                    disabled=items[i].disabled)
+                out.append(_row(line[ui.MARGIN_H:], i, current))
+                row_at[i] = len(out) - 1
                 continue
 
             _ct = items[i].cursor_title
             label = str(_ct if (_ct is not None and i == cursor) else items[i].title)
-            if multi:
-                max_w = cols - 9
-            else:
-                max_w = cols - 6
-            if len(label) > max_w:
-                label = label[:max_w - 1] + "…"
-            if multi:
-                if items[i].disabled and not items[i].checked:
-                    # Dimmed (interlocked), not selectable
-                    out.append(f"   {C.DIM}• {label}{C.RESET}")
-                elif i == cursor:
-                    glyph = f"{C.GREEN}✔{C.RESET}" if items[i].checked else f"{C.DIM}•{C.RESET}"
-                    out.append(f"  {C.ACCENT}›{C.RESET} {glyph} {C.PRIMARY}{C.BOLD}{label}{C.RESET}")
+            max_w = row_room - (5 if multi else 2)
+            if ui.visual_len(label) > max_w:             # measured as shown: a label may carry styles
+                if i == cursor:                          # the highlighted row scrolls through it
+                    label = ui.marquee(ui.strip_ansi(label), max_w, time.monotonic())
+                    _scrolling[0] = True
                 else:
-                    glyph = f"{C.GREEN}✔{C.RESET}" if items[i].checked else f"{C.DIM}•{C.RESET}"
-                    out.append(f"    {glyph} {C.DIM}{label}{C.RESET}")
+                    label = _clip_ansi(label, max_w - 1) + f"{C.RESET}…"
+            if multi:
+                glyph = (f"{C.GREEN}✔{C.RESET}" if items[i].checked else f"{C.DIM}•{C.RESET}")
+                if items[i].disabled and not items[i].checked:
+                    text = f"  {C.DIM}• {label}{C.RESET}"        # interlocked: dimmed, not selectable
+                else:
+                    text = f" {glyph} " + (f"{C.PRIMARY}{C.BOLD}{label}{C.RESET}" if i == cursor else label)
+                out.append(_row(text, i, i == cursor))
             elif items[i].disabled:
-                # Section heading / separator: dim, no pointer, slightly outdented.
-                out.append(f"  {C.DIM}{C.BOLD}{label}{C.RESET}" if label else "")
-            elif i == cursor:
-                out.append(f"  {C.ACCENT}›{C.RESET} {C.PRIMARY}{C.BOLD}{label}{C.RESET}")
+                # Section heading / separator: dim, slightly outdented.
+                out.append(_row(f"{C.DIM}{C.BOLD}{label}{C.RESET}" if label else "", i, False))
+            elif current:
+                out.append(_row(f" {C.PRIMARY}{C.BOLD}{label}{C.RESET}", i, True))
             else:
-                out.append(f"    {C.DIM}{label}{C.RESET}")
-            _row_plain[i] = _plain(out[-1])
-
+                out.append(_row(f" {label}", i, False))
+            row_at[i] = len(out) - 1
         remaining = n - viewport - vis
         out.append(f"  {C.DIM}╷ {remaining} below{C.RESET}" if remaining > 0 else "")
+        first = len(h_lines) + (1 if boxed else 0)       # where `out` starts on screen
+        w.pictures = []
+        _col_geo[0] = None
+        # A header's pictures (an image in it): its line k is on screen row 1 + top_margin() + k.
+        for line, col, rows, key, esc, *size in getattr(h_lines, 'pictures', ()):
+            w.pictures.append((1 + ui.top_margin() + line, col + 1, rows, key, esc, *size))
+        if boxed and (shown or pw or strip_h):
+            browser = box_lines(_browser_rows(out, shown, main_in, box_h - 2, first, len(pre) + (viewport > 0)),
+                                browser_w, box_h, box_title, box_right)
+            if pw:
+                browser = [b + p for b, p in zip(browser, _preview_column(pview, pw, box_h, browser_w, first))]
+            out = h_lines + browser + (_preview_strip(pview, strip_h, len(h_lines) + box_h) if strip_h else [])
+        elif boxed:
+            out = h_lines + box_lines([ln[ui.MARGIN_H:] if ln.startswith(" " * ui.MARGIN_H) else ln for ln in out],
+                                      _cols(), box_h, box_title, box_right)
+        else:
+            out = h_lines + out
+        # Where the rows landed, for clicks: the first row's line, and each row's
+        # plain text, to tell a click on a character from one on blank space.
+        _last_hlen[0] = first + len(pre) + (1 if viewport > 0 else 0)
+        for i, k in row_at.items():
+            if first + k < len(out):                 # a row the box had no room for has no text to click
+                _row_plain[i] = _plain(out[first + k])
         # Inset the hint block by the left margin so it never hugs an edge; _hint
         # centres within _cols() (= width-2*MARGIN_H), so this makes it symmetric.
         # Pin the hint bar to the bottom (just above the miniplayer + status) so
@@ -637,13 +856,16 @@ def _select_flat(message: str, choices: list, *,
                 continue
 
             if not _wait_for_keypress(0.05):
+                if _scrolling[0] and time.monotonic() - _scrolled_at[0] >= ui.MARQUEE_STEP_S:
+                    _scrolled_at[0] = time.monotonic()
+                    w.render(_lines())
                 continue
 
             key = _read_key(fd)
             # Transport keys, clicks on the now-playing box, and clicks on our own
             # hint glyphs are all handled once, here, before the switch below:
             # box → transport/open, hint → replay its key.
-            _ch = consume_chrome(key, _hint_cells)
+            _ch = consume_chrome(key, _hint_cells, free_keys=not _edit_on)
             if _ch is CHROME_HANDLED:
                 continue
             if _ch is CHROME_REDRAW:
@@ -796,6 +1018,9 @@ def _select_flat(message: str, choices: list, *,
                     cursor = j
                 _sel_last_click = None
                 w.render(_lines())
+            elif act == 'list.columns' and (trail or preview is not None):
+                set_columns_shown(not columns_shown())
+                _sel_last_click = None; w.anchor_reset(); w.render(_lines())
             elif shortcuts and key in shortcuts:  result = shortcuts[key]; break
             elif key == 'SCROLL_UP':             cursor = _step(cursor, -1); _sel_last_click = None; w.render(_lines())
             elif key == 'SCROLL_DOWN':           cursor = _step(cursor, 1); _sel_last_click = None; w.render(_lines())
@@ -816,11 +1041,21 @@ def _select_flat(message: str, choices: list, *,
                     continue
                 if w.row is None:
                     continue
-                # render() prepends MARGIN_V blank rows before lines[0].
-                # lines[] layout: H header lines, message, viewport-above
-                # indicator, then items. So item[viewport] is at:
-                #   terminal row = w.row + MARGIN_V + H + 2
-                i = r - w.row - ui.MARGIN_V - _last_hlen[0] - 2
+                # render() prepends top_margin() blank rows before lines[0], and
+                # _last_hlen holds how many lines come before item[viewport]
+                # (header, box top, subtitle, message, the "above" row).
+                geo = _col_geo[0]
+                if geo and not geo['main'][0] <= col <= geo['main'][1]:
+                    # The column browser: a row of a level above goes back to
+                    # it; the preview column does nothing.
+                    b = r - w.row - ui.top_margin() - geo['first']
+                    hit = next(((top + b, values, depth) for x0, x1, top, values, depth, lead in geo['trails']
+                                if x0 <= col <= x1 and b >= lead and top + b < len(values)), None)
+                    if hit is None:
+                        continue
+                    result = JumpTo(hit[2], hit[1][hit[0]])
+                    break
+                i = r - w.row - ui.top_margin() - _last_hlen[0]
                 idx = viewport + i
                 if not (0 <= idx < len(items)):
                     continue
@@ -940,10 +1175,6 @@ def live_select(message: str, provider: Callable[[str], list], *,
     # Maps an absolute (row, col) on a hint line → the key clicking it replays.
     _hint_cells: dict[tuple[int, int], str] = {}
 
-    def _header_lines() -> list[str]:
-        if header is None:
-            return []
-        return header() if callable(header) else list(header)
 
     def _selectable() -> list[int]:
         return [i for i, it in enumerate(items) if not it.disabled]
@@ -1020,9 +1251,13 @@ def live_select(message: str, provider: Callable[[str], list], *,
     def _lines() -> list:
         nonlocal viewport
         width = ui.get_terminal_width()
-        cols  = _cols()
+        boxed = box_fits()
+        ptitle, h_lines = panel_header(header)
+        cols  = _cols() - (2 if boxed else 0)       # rows lose their 2-space margin inside the box
         ui.footer_lines(width)   # refresh box height (see select._lines)
-        out = _header_lines()
+        out = []
+        if boxed and ptitle and ptitle.subtitle:
+            out.append(f"  {C.DIM}{ptitle.subtitle}{C.RESET}")
 
         qtext = "".join(query)
         # An empty message means the header already names the screen, so the query
@@ -1044,15 +1279,26 @@ def live_select(message: str, provider: Callable[[str], list], *,
         out.append(f"  {C.DIM}{count}{C.RESET}" if count else "")
 
         hint_lines = chrome_hint_lines(hints)
-        # out already holds header + message + count; +2 for the above/below rows.
-        overhead = len(out) + len(hint_lines) + 2
-        vis = max(2, _visible_rows() - overhead)
+        if boxed:
+            # The box runs from under any header down to the hint bar.
+            box_h = max(4, _hint_pin_target() - len(h_lines) - len(hint_lines))
+            vis = max(2, box_h - 2 - len(out) - 2)
+        else:
+            # header + message + count; +2 for the above/below rows.
+            overhead = len(h_lines) + len(out) + len(hint_lines) + 2
+            vis = max(2, _visible_rows() - overhead)
 
         n = len(items)
-        viewport = _scroll(viewport, cursor, vis, items)
-        out.append(f"  {C.DIM}╵ {viewport} above{C.RESET}" if viewport > 0 else "")
-        _fixed_rows[0] = len(out)   # rows before the first item: the click-math offset
+        viewport = _scroll(viewport, cursor, vis + 1, items)          # the "above" row only once scrolled
+        if viewport > 0:
+            viewport = _scroll(viewport, cursor, vis, items)
+            out.append(f"  {C.DIM}╵ {viewport} above{C.RESET}")
+        else:
+            vis += 1
+        first = len(h_lines) + (1 if boxed else 0)      # where `out` starts on screen
+        _fixed_rows[0] = first + len(out)   # rows before the first item: the click-math offset
         _row_plain.clear()
+        row_at: dict[int, int] = {}
 
         eff = min(cols, _COLUMNS_MAX_WIDTH)
         col_widths: list = []
@@ -1069,19 +1315,27 @@ def live_select(message: str, provider: Callable[[str], list], *,
         for i in range(viewport, min(viewport + vis, n)):
             it = items[i]
             if columns and it.cells:
-                out.append(_render_table_row(it.cells, columns, i == cursor,
-                                             col_widths, eff, _EDGE_MARGIN,
-                                             dim=section_nav and owners[i] != focus))
+                line = _render_table_row(it.cells, columns, i == cursor,
+                                         col_widths, eff, _EDGE_MARGIN,
+                                         dim=section_nav and owners[i] != focus)
+                # The highlighted result on the bar, like every list's.
+                out.append(line[:ui.MARGIN_H] + ui.on_bar(line[ui.MARGIN_H:], cols - ui.MARGIN_H)
+                           if i == cursor else line)
             elif it.disabled:
                 out.append(f"  {C.DIM}{C.BOLD}{it.title}{C.RESET}" if it.title else "")
             elif i == cursor:
-                out.append(f"  {C.ACCENT}›{C.RESET} {C.PRIMARY}{C.BOLD}{it.title}{C.RESET}")
+                out.append("  " + ui.on_bar(f" {C.PRIMARY}{C.BOLD}{it.title}{C.RESET}", cols - ui.MARGIN_H))
             else:
-                out.append(f"    {C.DIM}{it.title}{C.RESET}")
-            _row_plain[i] = _plain(out[-1])
+                out.append(f"   {it.title}")
+            row_at[i] = len(out) - 1
 
         remaining = n - viewport - vis
         out.append(f"  {C.DIM}╷ {remaining} below{C.RESET}" if remaining > 0 else "")
+        out = (boxed_frame(h_lines, out, ptitle.title if ptitle else "", box_h, False) if boxed
+               else h_lines + out)
+        for i, k in row_at.items():
+            if first + k < len(out):                 # a row the box had no room for has no text to click
+                _row_plain[i] = _plain(out[first + k])
         # Inset the hint block by the left margin so it never hugs an edge; _hint
         # centres within _cols() (= width-2*MARGIN_H), so this makes it symmetric.
         _filler = _hint_pin_target() - len(out) - len(hint_lines)
@@ -1156,7 +1410,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
                 parts = key.split(':')
                 r = int(parts[2]) if len(parts) > 2 else 0
                 col = int(parts[3]) if len(parts) > 3 else 1
-                i = r - w.row - ui.MARGIN_V - _fixed_rows[0]
+                i = r - w.row - ui.top_margin() - _fixed_rows[0]
                 idx = viewport + i
                 if 0 <= idx < len(items):
                     clickable = not items[idx].disabled
@@ -1234,12 +1488,11 @@ def confirm(message: str, default: bool = False) -> bool:
         dflt = "yes" if default else "no"
         pairs = [(L("confirm.yes"), "yes"), (L("confirm.no"), "no"),
                  (L("confirm.default"), f"default ({dflt})"), (L("confirm.back"), "back")]
-        head = [
-            f"  {C.DIM}{message}{C.RESET}",
-            f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}",
-        ]
-        lines = list(head)
-        append_chrome(lines, pairs, _hint_cells, help_key=True)
+        # The question itself, wrapped inside the box (a long one would be cut
+        # short as the box's title).
+        lines = [f"  {C.BOLD}{part}{C.RESET}" for part in
+                 textwrap.wrap(message, max(10, ui.get_terminal_width() - 2 * ui.MARGIN_H - 4)) or [""]]
+        lines, _dx = boxed_chrome(lines, "", pairs, _hint_cells, help_key=True)
         w.render(lines)
 
     try:

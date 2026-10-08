@@ -3,10 +3,11 @@ player and transport keys, mouse reporting, and the per-edit raw-text toggle."""
 from __future__ import annotations
 import sys
 from backbone.prompt.core import (
-    _IS_WINDOWS, _hint, add_hint_click_cells, footer_click_action, _hint_pin_target,
+    box_fits, boxed_frame, render_status_bar, C,
+    _IS_WINDOWS, FOOTER_ACTIONS, _hint, add_hint_click_cells, footer_click_action, _hint_pin_target,
     screen_invalidate, HINTS_CLICK, is_hints_key, toggle_hints, place_help_toggle,
 )
-from backbone import keys, ui
+from backbone import keys, nav, ui
 
 
 # Live on every screen: the background-audio transport (routed through
@@ -74,6 +75,26 @@ def set_player_opener(fn) -> None:
     _player_opener = fn
 
 
+_command_line = None
+
+
+def set_command_line(fn) -> None:
+    """Register a ``callable()`` that `:` opens, where a screen leaves it free.
+    It returns whether it opened a screen of its own (the screen under it then
+    needs drawing again)."""
+    global _command_line
+    _command_line = fn
+
+
+def open_command_line() -> bool | None:
+    """Run the registered command line: whether it opened a screen of its own;
+    None when there is none to run here (none registered, or a screen that
+    keeps you in it, nav.modal())."""
+    if _command_line is None or nav.is_modal():
+        return None
+    return bool(_command_line())
+
+
 # --- shared widget chrome -------------------------------------------------
 # Every screen owes the user the same four things: a hint bar pinned above the
 # now-playing box and status bar so its keys never move, those keys clickable, the
@@ -135,15 +156,43 @@ def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
     if hint_lines:
         start = len(out) - len(hint_lines)
         for k in range(len(hint_lines)):
-            # `_Widget.render` lays line j at terminal row anchor(1) + MARGIN_V + j.
+            # `_Widget.render` lays line j at terminal row anchor(1) + top_margin() + j.
             add_hint_click_cells(cells, out[start + k],
-                                 1 + ui.MARGIN_V + (start + k), items)
-    place_help_toggle(out, 1 + ui.MARGIN_V, cells, help_key)
+                                 1 + ui.top_margin() + (start + k), items)
+    place_help_toggle(out, 1 + ui.top_margin(), cells, help_key)
     return out
 
 
-def consume_chrome(key: str, cells: dict):
-    """Handle a transport key, a now-playing box click, or a click on a hint key.
+def inner_rule() -> str:
+    """A divider across the inside of a widget's box (boxed_chrome)."""
+    return f"  {C.DIM}{'─' * max(1, ui.get_terminal_width() - 2 * ui.MARGIN_H - 4)}{C.RESET}"
+
+
+def boxed_chrome(body: list, title: str, pairs, cells: dict, *, extra: str = "",
+                 help_key: bool = False, header: list | None = None) -> tuple[list, int]:
+    """A widget's whole frame: any `header` lines, then `body` (lines with the
+    usual left margin) in a box titled `title` that reaches down to the hint
+    bar, then the bar (append_chrome). In a window too small for a box, `title`
+    is a line above the body instead. Either way the body starts one line under
+    the header; returns the lines and how many columns right the body moved (2
+    inside the box, for "│ " where the margin was), for a widget that maps
+    clicks on its body."""
+    title, header = title.strip().rstrip(":"), list(header or [])
+    if not box_fits():
+        out = header + [f"  {C.DIM}{title}{C.RESET}"] + list(body)
+        append_chrome(out, pairs, cells, extra=extra, help_key=help_key)
+        return out, 0
+    box_h = max(3, _hint_pin_target() - len(header) - len(chrome_hint_lines(pairs, extra=extra)))
+    out = boxed_frame(header, list(body), title, box_h, help_key and not header)
+    append_chrome(out, pairs, cells, extra=extra, help_key=help_key)
+    return out, 2
+
+
+def consume_chrome(key: str, cells: dict, free_keys: bool = False):
+    """Handle a transport key, a now-playing box click, a click on a hint key,
+    or a click on the tab bar. With `free_keys` (a screen that has no other use
+    for them), also Tab / Shift-Tab and the digits for the tabs, and `:` for
+    the command line.
 
     Returns :data:`CHROME_HANDLED` when the key is fully dealt with,
     :data:`CHROME_REDRAW` when the caller should also repaint, the synthesised
@@ -154,6 +203,21 @@ def consume_chrome(key: str, cells: dict):
         # Back in focus: the terminal may not have painted us meanwhile (or a
         # background track change went by), so repaint everything.
         screen_invalidate()
+        return CHROME_REDRAW
+    if free_keys and key == ':' and (opened := open_command_line()) is not None:
+        if not opened:                       # just the overlay, put back: only the toast is new
+            render_status_bar()
+            return CHROME_HANDLED
+        screen_invalidate()
+        if not _IS_WINDOWS:
+            sys.stdout.write("\033[?1000h\033[?1006h")
+        return CHROME_REDRAW
+    tab = nav.tab_for(key, free_keys)
+    if tab is not None:
+        nav.switch_to(tab)              # back here once this tab shows again
+        screen_invalidate()
+        if not _IS_WINDOWS:
+            sys.stdout.write("\033[?1000h\033[?1006h")   # the other tab may have had the mouse off
         return CHROME_REDRAW
     if is_hints_key(key, bool(cells.get('__help_key__'))):
         toggle_hints()
@@ -183,7 +247,7 @@ def consume_chrome(key: str, cells: dict):
                 sys.stdout.write("\033[?1000h\033[?1006h")
             sys.stdout.flush()
             return CHROME_REDRAW
-        if act in ('playpause', 'next', 'prev') and _transport_handler is not None:
+        if act in FOOTER_ACTIONS and _transport_handler is not None:
             _transport_handler(act)
             return CHROME_HANDLED
         hit = cells.get((row, col))
@@ -210,8 +274,9 @@ def disable_mouse() -> None:
 
 
 def set_transport_handler(fn) -> None:
-    """Register ``callable(action)`` for the global transport hotkeys, where
-    action is 'playpause', 'next', or 'prev'. Kept as a registered callback so
+    """Register ``callable(action)`` for the global transport hotkeys and clicks
+    on the now-playing box, where action is one of FOOTER_ACTIONS ('time': its
+    clock was clicked). Kept as a registered callback so
     prompt need not import the playback layer (mirrors set_player_opener)."""
     global _transport_handler
     _transport_handler = fn

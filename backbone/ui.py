@@ -10,8 +10,10 @@ import time as _time
 from typing import Any
 import re
 import unicodedata
+from itertools import groupby
 from pathlib import Path
 
+from backbone import nav
 from backbone.nav import NAV_STACK
 from backbone.log import quietly
 
@@ -100,6 +102,7 @@ class Colors:
     PRIMARY = "\033[1;37m" # Bold white
     WHITE = "\033[37m" # Normal white
     ACCENT = "\033[1;32m"   # green; a host's setting changes it through set_accent
+    ACCENT2 = "\033[1;36m"  # the second accent (borders, the active tab): set_accent(…, secondary=True)
     CYAN = "\033[1;36m"
     YELLOW = "\033[1;33m"
     MAGENTA = "\033[1;35m"
@@ -111,6 +114,10 @@ class Colors:
     RESET = "\033[0m"
     BACK = "\x1b[47m"
     INVERT = "\033[7m"
+    # Highlight bars, a soft grey behind a row: the highlighted row of the list
+    # you're in, and (fainter) the row a column of the level above opened.
+    BAR = "\033[48;5;237m"
+    BAR_DIM = "\033[48;5;235m"
     HIDE = "\033[?25l"
     SHOW = "\033[?25h"
     # semantic colours for a tool's own views (backcrack's watch uses RED for failures)
@@ -127,10 +134,20 @@ class Colors:
 # The styling half of Colors: everything that paints rather than moves the
 # cursor. Suppressing colour must not suppress HIDE/SHOW, which are cursor
 # control and still needed on a pipe.
-_STYLE_NAMES = ('PRIMARY', 'WHITE', 'ACCENT', 'CYAN', 'YELLOW', 'MAGENTA', 'GREEN',
-                'DIM', 'BOLD', 'ITALIC', 'UNDERLINE', 'RESET', 'BACK', 'INVERT',
+_STYLE_NAMES = ('PRIMARY', 'WHITE', 'ACCENT', 'ACCENT2', 'CYAN', 'YELLOW', 'MAGENTA', 'GREEN',
+                'DIM', 'BOLD', 'ITALIC', 'UNDERLINE', 'RESET', 'BACK', 'INVERT', 'BAR', 'BAR_DIM',
                 'FRAME', 'TEAL', 'AMBER', 'RED', 'TXT', 'MUTE', 'R', 'B')
 _STYLE_CODES = {name: getattr(Colors, name) for name in _STYLE_NAMES}
+
+
+def on_bar(text: str, width: int, bar: str | None = None) -> str:
+    """`text` on a highlight bar `width` columns wide (Colors.BAR unless
+    `bar`), the bar kept up through any resets inside it."""
+    bar = Colors.BAR if bar is None else bar
+    if not bar:
+        return text + " " * max(0, width - visual_len(text))
+    body = text.replace(Colors.RESET, Colors.RESET + bar) if Colors.RESET else text
+    return f"{bar}{body}{' ' * max(0, width - visual_len(text))}{Colors.RESET}"
 
 
 def colour_enabled() -> bool:
@@ -177,6 +194,7 @@ ACCENT_PRESETS = [
     ('lavender', 'Lavender', '#B39DDB'), ('sky', 'Sky', '#4FC3F7'), ('mint', 'Mint', '#6FDFA8'),
 ]
 DEFAULT_ACCENT = 'green'
+DEFAULT_ACCENT2 = 'cyan'
 
 
 def parse_hex_colour(text: str) -> tuple[int, int, int] | None:
@@ -220,13 +238,14 @@ def accent_label(value) -> str:
                 str(value).upper() if accent_code(value) else 'Green')
 
 
-def set_accent(value) -> None:
-    """Use `value` (an `accent_colour` setting) as the accent from now on; an
-    unknown value falls back to the default."""
-    code = accent_code(value) or accent_code(DEFAULT_ACCENT)
-    _STYLE_CODES['ACCENT'] = code
+def set_accent(value, secondary: bool = False) -> None:
+    """Use `value` (a preset key or "#RRGGBB") as the accent from now on, or as
+    the second accent; an unknown value falls back to that one's default."""
+    slot = 'ACCENT2' if secondary else 'ACCENT'
+    code = accent_code(value) or accent_code(DEFAULT_ACCENT2 if secondary else DEFAULT_ACCENT)
+    _STYLE_CODES[slot] = code
     if _colour_on:
-        Colors.ACCENT = code
+        setattr(Colors, slot, code)
 
 
 _screen_invalidator = None
@@ -263,6 +282,7 @@ def enter_alt_screen() -> None:
     sys.stdout.write("\033[?1049h\033[?1004h\033[?7l\033[H\033[3J\033[J" + Colors.HIDE)
     sys.stdout.flush()
     _screen_cleared()
+    _in_app[0] = True
 
 
 def exit_alt_screen() -> None:
@@ -270,6 +290,16 @@ def exit_alt_screen() -> None:
     the cursor."""
     sys.stdout.write("\033[?25h\033[?7h\033[?1004l\033[?1049l")
     sys.stdout.flush()
+    _in_app[0] = False
+
+
+_in_app = [False]   # on the alternate screen, where everything is laid out in boxes
+
+
+def _on_app_screen() -> bool:
+    """Writing to the app's screen: in the app, and not to output being
+    captured (a command run from its `:` line)."""
+    return _in_app[0] and sys.stdout is sys.__stdout__
 
 
 def clear_screen() -> None:
@@ -304,6 +334,20 @@ def set_footer_provider(fn) -> None:
     """Register a ``callable(width) -> list[str] | None`` that renders the now-playing box."""
     global _footer_provider
     _footer_provider = fn
+
+
+# The now-playing box's clock, as (first, last) column on its content row, when
+# a click on it does something (set by the box provider; None otherwise).
+_footer_time_cols: tuple | None = None
+
+
+def set_footer_time_cols(cols: tuple | None) -> None:
+    global _footer_time_cols
+    _footer_time_cols = cols
+
+
+def footer_time_cols() -> tuple | None:
+    return _footer_time_cols
 
 
 def set_footer_signature(sig: tuple | None) -> None:
@@ -416,7 +460,12 @@ def print_inline_progress(message: str, progress: float) -> None:
     (a per-track ffmpeg pass): pulsing beacon + bar so a slow scan still
     looks alive instead of a hung terminal, inset by MARGIN_H and centred
     like the rest of the chrome. Call `clear_inline_progress()` once the
-    loop finishes."""
+    loop finishes. In the app (the alternate screen) it's a box over the
+    middle of the screen instead, not a line wherever the cursor is."""
+    if _on_app_screen():
+        from backbone.prompt.core import progress_float
+        progress_float(message, progress)
+        return
     bar = get_progress_bar(progress, 24)
     width = get_terminal_width()
     avail = max(1, width - 2 * MARGIN_H)
@@ -430,7 +479,11 @@ def print_inline_progress(message: str, progress: float) -> None:
 
 
 def clear_inline_progress() -> None:
-    """Erase the line left by `print_inline_progress()`."""
+    """Erase the line (or the box) left by `print_inline_progress()`."""
+    if _on_app_screen():
+        from backbone.prompt.core import screen_float_close
+        screen_float_close()
+        return
     sys.stdout.write("\r\033[K")
     sys.stdout.flush()
 
@@ -442,11 +495,29 @@ def show_status(message: str, duration: float = STATUS_S) -> None:
     _toast_expiry = _time.time() + duration
 
 
+def show_error(message: str) -> None:
+    """Flash "Error: message" in the status bar, held longer, and log it."""
+    from backbone.log import log
+    log.warning("%s", message)
+    show_status(f"Error: {message}", STATUS_WARNING_S)
+
+
 def show_loading(message: str) -> None:
     """Clear the screen and display a greyed loading message during long operations."""
     clear_screen()
     sys.stdout.write(f"\n  {Colors.DIM}{message}{Colors.RESET}\n")
     sys.stdout.flush()
+
+
+# A full-screen view that is its own context (a player) hides the breadcrumb
+# while it is open; toasts and background tasks still show.
+_breadcrumb_hidden = [0]
+
+
+def hide_breadcrumb(hidden: bool) -> None:
+    """Leave the menu breadcrumb off the status bar (True), or put it back
+    (False). Calls nest: each True needs its False."""
+    _breadcrumb_hidden[0] = max(0, _breadcrumb_hidden[0] + (1 if hidden else -1))
 
 
 def get_status_line() -> str:
@@ -469,7 +540,7 @@ def get_status_line() -> str:
         right_parts.append(f"{Colors.DIM}{_toast_message}{Colors.RESET}")
     right = sep.join(right_parts)
 
-    crumb = _get_breadcrumb_str(cols // 2) if NAV_STACK else ""
+    crumb = _get_breadcrumb_str(cols // 2) if NAV_STACK and not _breadcrumb_hidden[0] else ""
     left = f"  {Colors.DIM}{crumb}{Colors.RESET}" if crumb else ""
 
     if left and right:
@@ -477,14 +548,167 @@ def get_status_line() -> str:
         status = left + " " * gap + right + "  "
     elif left:
         status = left
-    elif right:
-        status = "  " + right + "  "
+    elif right:                             # toasts and tasks keep to the right, crumb or none
+        status = " " * max(2, cols - visual_len(right) - 2) + right + "  "
     else:
         status = ""
 
     if visual_len(status) > cols:
         status = clip_ansi(status, cols)
     return status
+
+_tab_spans: list = []   # (first col, last col, tab) of each label in the bar last drawn
+
+
+def tab_bar_lines() -> list[str]:
+    """The top rows while an app runs as tabs ([] otherwise): the tabs' names
+    along one row, the one showing outlined like a folder's tab over it, its
+    outline running down into the screen's top border (tab_notch: the painter
+    cuts the opening there). Their keys (F1, F2…) show with the hints (the
+    `?` toggle), in the accent, as hint keys are; in a window too narrow for
+    every name only the showing tab keeps its name, the others their keys."""
+    _tab_spans.clear()
+    _notch[0] = None
+    names = [name for name, _run in nav.TABS]
+    if not names:
+        return []
+    on = nav.active_tab()
+    total = get_terminal_width() - 2 * MARGIN_H
+    keys_on = _tab_keys_shown()
+    modal = nav.is_modal()
+
+    def labels(full: bool) -> list:
+        """(key, name) per tab: the key shown with the hints, or in place of
+        the name when the tabs don't all fit."""
+        return [(f"F{i + 1}" if keys_on or not (full or i == on) else "",
+                 n if full or i == on else "") for i, n in enumerate(names)]
+
+    def width(ls) -> int:
+        return sum(len(k) + len(n) + (1 if k and n else 0) for k, n in ls) + _TAB_GAP * (len(ls) - 1) + 2
+
+    # The other tabs give their names way first, then (very narrow) the showing one is cut.
+    for full in (True, False):
+        ls = labels(full)
+        if width(ls) <= total:
+            break
+    else:
+        ls = [(k, clip_ansi(n, max(1, total - 6))) if i == on else ("", "") for i, (k, n) in enumerate(labels(False))]
+
+    text = " " * (MARGIN_H + 2)                         # the first name two in from the screen's left border
+    col = MARGIN_H + 2                                  # 0-based column the next name starts at
+    for i, (k, n) in enumerate(ls):
+        if not (k or n):
+            continue
+        if col > MARGIN_H + 2:
+            text += " " * _TAB_GAP
+            col += _TAB_GAP
+        plain = f"{k} {n}" if k and n else k or n
+        key = f"{Colors.ACCENT if keys_on else Colors.DIM}{k}{Colors.RESET}" if k else ""
+        if i == on and not modal:
+            name = f"{Colors.BOLD}{n}{Colors.RESET}"
+        else:
+            name = f"{Colors.DIM}{n}{Colors.RESET}"
+        text += (key + " " + name) if k and n else (key or name)
+        _tab_spans.append((col, col + 1 + len(plain), i))      # 1-based, with a space either side
+        if i == on:
+            _notch[0] = (col - 2, col + len(plain) + 1)         # 0-based: its outline's two sides
+        col += len(plain)
+    mid = text
+    top = ""
+    if _notch[0]:
+        a, b = _notch[0]
+        top = " " * a + f"{Colors.DIM}╭{'─' * (b - a - 1)}╮{Colors.RESET}"
+        mid += " " * max(0, b + 1 - visual_len(mid))          # out to its right side (the last tab's too)
+        mid = _overlay(mid, a, f"{Colors.DIM}│{Colors.RESET}")
+        mid = _overlay(mid, b, f"{Colors.DIM}│{Colors.RESET}")
+    return [top, mid]
+
+
+def _overlay(line: str, col: int, glyph: str) -> str:
+    """`line` with the one cell at 0-based column `col` (a space) swapped for `glyph`."""
+    out, at, i = [], 0, 0
+    while i < len(line):
+        m = _ANSI_AT.match(line, i)
+        if m:
+            out.append(m.group(0)); i = m.end(); continue
+        out.append(glyph if at == col else line[i])
+        at += char_cols(line[i]); i += 1
+    return "".join(out)
+
+
+_ANSI_AT = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+_TAB_GAP = 4                       # between two tabs' names: room for the outline's sides
+_notch: list = [None]              # the showing tab's outline, (left, right) 0-based columns
+
+
+def tab_notch() -> tuple | None:
+    """Where the showing tab's outline meets the screen under the bar, laid
+    out for the window as it is now (a layout asking before the bar's next
+    paint, just after a resize, mustn't get where it was)."""
+    if not (nav.TABS and tab_rows()):
+        return None
+    tab_bar_lines()
+    return _notch[0]
+
+
+_tab_keys_shown = lambda: False      # noqa: E731 (the hints' switch, set by prompt: set_tab_keys_shown)
+
+
+def set_tab_keys_shown(fn) -> None:
+    """Whether the tabs show their keys: the hints' switch (prompt.core)."""
+    global _tab_keys_shown
+    _tab_keys_shown = fn
+
+
+_tabs_hidden = [False]
+
+
+def set_tabs_hidden(hidden: bool) -> None:
+    """Leave the tab bar off the screen (a full-screen view that offers it,
+    like a player); its keys still switch tabs."""
+    _tabs_hidden[0] = hidden
+
+
+_focused = [True]                  # the terminal's window has focus (its focus reports, when it sends them)
+
+
+def set_window_focused(focused: bool) -> None:
+    _focused[0] = focused
+
+
+def window_focused() -> bool:
+    """Whether the window has focus, as the terminal last reported (True if
+    it never says). A terminal may read a window's output slowly while it's
+    in the background: heavy writes (a full-size image) can wait for focus."""
+    return _focused[0]
+
+
+_CHROME_MIN_ROWS = 6               # a window shorter than this has no room for the tab bar or status line
+
+
+def chrome_fits() -> bool:
+    """Whether the window has room for the tab bar and the status line: a
+    shorter one gives every row to the screen itself."""
+    return get_terminal_height() >= _CHROME_MIN_ROWS
+
+
+def tab_rows() -> int:
+    """Rows the tab bar takes at the top: 2 (the showing tab's outline, then
+    the names) while an app runs as tabs, unless it's hidden or the window is
+    too short for it. The row under them is the screen's top border, the
+    tab's outline running into it."""
+    return 2 if nav.TABS and not _tabs_hidden[0] and chrome_fits() else 0
+
+
+def top_margin() -> int:
+    """Rows above every screen's content: the margin, or the tab bar."""
+    return max(MARGIN_V, tab_rows())
+
+
+def tab_at(col: int) -> int | None:
+    """The tab whose label is at column `col` of the bar."""
+    return next((i for first, last, i in _tab_spans if first <= col <= last), None)
+
 
 def _tty_size() -> os.terminal_size:
     """Ask the terminal itself. shutil.get_terminal_size() prefers exported
@@ -623,7 +847,7 @@ _ZERO_WIDTH_SET = frozenset(_ZERO_WIDTH)
 # They are listed as wide deliberately, as an over-estimate. Reserving two cells
 # and getting one leaves a small gap; reserving one and getting two overruns
 # whatever sits to the right, and that is the now-playing box's closing border.
-_WIDE_SET = frozenset('⏮⏭⏸⏵⏪⏩⏫⏬⏯⏱⏲⏰')
+AMBIGUOUS_WIDE = frozenset('⏮⏭⏸⏵⏪⏩⏫⏬⏯⏱⏲⏰')
 
 _cols_cache: dict = {}
 
@@ -634,7 +858,7 @@ def char_cols(ch: str) -> int:
     if w is None:
         if ch in _ZERO_WIDTH_SET or unicodedata.combining(ch):
             w = 0
-        elif ch in _WIDE_SET or unicodedata.east_asian_width(ch) in ('W', 'F'):
+        elif ch in AMBIGUOUS_WIDE or unicodedata.east_asian_width(ch) in ('W', 'F'):
             w = 2
         else:
             w = 1
@@ -703,6 +927,38 @@ def clip_ansi(text: str, max_cols: int, reset: bool = True) -> str:
     if truncated and reset and not res.endswith(Colors.RESET):
         res += Colors.RESET
     return res
+
+
+# How often something scrolling through a marquee needs redrawing.
+MARQUEE_BPM = 100                    # scrolling text moves a column per beat: unhurried
+MARQUEE_STEP_S = 60 / MARQUEE_BPM
+
+
+def set_marquee_bpm(bpm: float) -> None:
+    """How fast scrolling text moves: a column per beat at `bpm`."""
+    global MARQUEE_BPM, MARQUEE_STEP_S
+    MARQUEE_BPM = max(1.0, float(bpm))
+    MARQUEE_STEP_S = 60 / MARQUEE_BPM
+
+
+def marquee(text: str, width: int, t: float, speed: float | None = None, pause: float = 2.0) -> str:
+    """Plain `text` fitted to `width` columns at time `t` (seconds): as it is
+    when it fits, else scrolling through it `speed` columns a second (a column
+    a beat at MARQUEE_BPM unless given), held for
+    `pause` seconds at each end before starting over."""
+    over = visual_len(text) - width
+    if over <= 0:
+        return text
+    speed = speed or MARQUEE_BPM / 60
+    run = over / speed
+    p = t % (2 * pause + run)
+    skip = 0 if p < pause else over if p >= pause + run else int((p - pause) * speed)
+    for i, ch in enumerate(text):                  # drop `skip` columns from the front
+        if skip <= 0:
+            text = text[i:]
+            break
+        skip -= char_cols(ch)
+    return clip_ansi(text, width, reset=False)
 
 
 def truncate_text(text: str, max_width: int, placeholder: str = "…", front: bool = False) -> str:
@@ -820,11 +1076,19 @@ def _get_breadcrumb_str(width: int) -> str:
 
 
 
-def get_progress_bar(progress: float, width: int = 40) -> str:
+def get_progress_bar(progress: float, width: int = 40, span: tuple | None = None) -> str:
     """
     A pip-style progress bar.
     [━━━━━━━━━━━━━━━━━━━━━━━━╸          ]
+    `span`: a section to pick out (see progress_cells).
     """
+    return f"{Colors.DIM}[{Colors.RESET}{progress_cells(progress, width, span)}{Colors.DIM}]{Colors.RESET}"
+
+
+def progress_cells(progress: float, width: int, span: tuple | None = None, rest: str = " ") -> str:
+    """A progress bar's `width` cells, coloured: what's played bright, the rest
+    `rest` (dim). `span`: (start, end) fractions of one section (a chapter) to
+    pick out: from its start to now in the accent colour, from now to its end dim."""
     progress = max(0, min(1, progress))
 
     filled_width = progress * width
@@ -842,9 +1106,15 @@ def get_progress_bar(progress: float, width: int = 40) -> str:
         else:
             bar += " " # Not enough for a tip yet
 
-    padding = " " * (width - len(bar))
-
-    return f"{Colors.DIM}[{Colors.RESET}{Colors.PRIMARY}{bar}{padding}{Colors.RESET}{Colors.DIM}]{Colors.RESET}"
+    cells = [(Colors.PRIMARY, c) for c in bar.rstrip(" ")]
+    cells += [(Colors.DIM, rest)] * (width - len(cells))
+    if span:
+        lo = max(0, min(width - 1, int(span[0] * width)))
+        hi = max(lo + 1, min(width, round(span[1] * width)))
+        cells[lo:hi] = [(Colors.ACCENT, c) if colour == Colors.PRIMARY else (Colors.DIM, "━")
+                        for colour, c in cells[lo:hi]]
+    return "".join(f"{colour}{''.join(c for _, c in group)}{Colors.RESET}"
+                   for colour, group in groupby(cells, key=lambda cell: cell[0]))
 
 
 C = Colors   # the short name every widget uses

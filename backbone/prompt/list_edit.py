@@ -6,7 +6,8 @@ import os
 from backbone.prompt.core import (
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, _hint, block_cursor,
     block_cursor_width, _read_key, _visible_rows, _cols, _Widget, add_hint_click_cells,
-    footer_click_action, _hint_pin_target, screen_takeover_next, add_help_corner,
+    FOOTER_ACTIONS, footer_click_action, _hint_pin_target, screen_takeover_next, add_help_corner,
+    box_fits, boxed_frame, place_help_toggle,
 )
 from backbone import keys, ui
 from backbone import datetime_parse as dtp
@@ -16,7 +17,7 @@ from backbone.prompt.chrome import (
     CHROME_HANDLED, chrome_hint_pairs, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, MODE_TOGGLE, move_hint,
 )
 from backbone.prompt.lists import confirm
-from backbone.prompt.text import path, system_editor_edit
+from backbone.prompt.text import multiline, path
 from backbone.prompt.core import C
 from backbone.prompt.core import edit_line
 
@@ -252,8 +253,9 @@ def _build_list_edit_lines(
         base_hints[keys.label("global.raw_text")] = "raw text"
     edit_hints = {"tab/⇧tab": "column", "esc": "back", "↵": "save"}
 
-    out.append(f"  {C.DIM}{message}{C.RESET}")
-    out.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
+    boxed = box_fits()
+    if not boxed:                                    # no box: the message is a line over the list
+        out.append(f"  {C.DIM}{message}{C.RESET}")
 
     avail_w = max(10, inner - 4 - (2 * (num_cols - 1)))
     col_widths = _layout_columns(num_cols, avail_w, col_ratios, col_mins)
@@ -290,7 +292,9 @@ def _build_list_edit_lines(
     hint_raw = hint_res[0] if isinstance(hint_res, tuple) else hint_res
     hint_lines = hint_raw.split("\n") if hint_raw else []
 
-    _LEDIT_HEADER_ROWS = 4   # message + separator + col-headers + col-underline
+    # Boxed, the message is the box's title, in its top border: one row, where
+    # unboxed it's the message and a separator.
+    _LEDIT_HEADER_ROWS = 3   # (box top | the message line) + col-headers + col-underline
     _LEDIT_FOOTER_ROWS = 1   # bottom separator (hints follow immediately)
     fixed_overhead = _LEDIT_HEADER_ROWS + _LEDIT_FOOTER_ROWS + len(hint_lines)
     vis = max(2, _visible_rows() - fixed_overhead)
@@ -413,11 +417,15 @@ def _build_list_edit_lines(
                 else:
                     out.append(f"  {cursor_glyph} {cell_str}")
 
-    # Pin the bottom separator + hint bar to the bottom of the screen.
-    _filler = _hint_pin_target() - len(out) - 1 - len(hint_lines)
-    if _filler > 0:
-        out.extend([""] * _filler)
-    out.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
+    # Pin the bottom separator (the box's bottom) + hint bar to the bottom of the screen.
+    if boxed:
+        out = boxed_frame([], out, message.strip().rstrip(":"),
+                          max(4, _hint_pin_target() - len(hint_lines)), not edit_mode)
+    else:
+        _filler = _hint_pin_target() - len(out) - 1 - len(hint_lines)
+        if _filler > 0:
+            out.extend([""] * _filler)
+        out.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
     out.extend(f"{' ' * ui.MARGIN_H}{h}" for h in hint_lines)
 
     return out, viewport, vis, _LEDIT_HEADER_ROWS, active_hints, len(hint_lines)
@@ -562,9 +570,11 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
             _start = len(lines) - n_hint
             for _k in range(n_hint):
                 add_hint_click_cells(_hint_cells, lines[_start + _k],
-                                     1 + ui.MARGIN_V + (_start + _k), _hp)
-        if lines:               # `?` is typed while a cell is being edited
-            lines[0] = add_help_corner(lines[0], 1 + ui.MARGIN_V, _hint_cells, help_key=not edit_mode)
+                                     1 + ui.top_margin() + (_start + _k), _hp)
+        if lines and box_fits():  # the box's border carries the toggle; `?` is typed while editing
+            place_help_toggle(lines, 1 + ui.top_margin(), _hint_cells, help_key=not edit_mode)
+        elif lines:
+            lines[0] = add_help_corner(lines[0], 1 + ui.top_margin(), _hint_cells, help_key=not edit_mode)
         w.render(lines)
 
     def _commit_edit_buffer():
@@ -808,7 +818,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                         enable_mouse()
                         sys.stdout.flush()
                         w.anchor_reset(); _le_last_click = None; _render(); continue
-                    if _act in ('playpause', 'next', 'prev') and chrome._transport_handler is not None:
+                    if _act in FOOTER_ACTIONS and chrome._transport_handler is not None:
                         chrome._transport_handler(_act); continue
                     _hk = _hint_cells.get((_mr, _mc))
                     if _hk is not None:
@@ -829,8 +839,8 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                     _parts = key.split(':')
                     _btn, _mrow = int(_parts[1]), int(_parts[2])
                     if _btn == 0 and items:
-                        # render() prepends MARGIN_V blank rows before lines[0]
-                        _line_idx   = _mrow - 1 - ui.MARGIN_V
+                        # render() prepends top_margin() blank rows before lines[0]
+                        _line_idx   = _mrow - 1 - ui.top_margin()
                         _item_offset = _line_idx - _le_header_rows
                         if 0 <= _item_offset < _le_vis:
                             _clicked_idx = viewport + _item_offset
@@ -931,7 +941,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                         else:
                             template = "# One entry per line\n"
                         _restore_term_attrs(fd, old)
-                        text_input = system_editor_edit(initial_text=template)
+                        text_input = multiline(message, template)
                         _set_raw(fd)
                     else:
                         # Path prompt (with completion), then auto-detect the format.
@@ -947,7 +957,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                                 with open(os.path.expanduser(file_path), encoding='utf-8') as _fp:
                                     text_input = _fp.read()
                             except OSError:
-                                ui.show_status(f"Couldn't read {file_path}")
+                                ui.show_error(f"couldn't read {file_path}")
                                 text_input = None
                     enable_mouse()   # re-arm mouse
                     screen_takeover_next()   # paint over the previous screen, no flash
