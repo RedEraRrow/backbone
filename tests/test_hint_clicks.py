@@ -41,7 +41,7 @@ class HelpCornerKeyTest(unittest.TestCase):
         free, _ = self._chrome(help_key=True)
         typed, _ = self._chrome(help_key=False)
         self.assertIn("[?] help │", free[1])
-        self.assertIn("[^/] help │", typed[1])
+        self.assertIn(f"[{keys.glyph(keys.of('global.help_typed')[0])}] help │", typed[1])   # ^/, or ^g in macOS's Terminal
         self.assertEqual(pc.ui.visual_len(free[1]), pc.ui.visual_len(typed[1]))
         self.assertEqual(pc.ui.visual_len(free[1]), pc.ui.visual_len(free[0]))
 

@@ -30,7 +30,7 @@ class OverlayTest(unittest.TestCase):
     def test_a_resize_lays_the_screen_under_it_out_again(self):
         from backbone.prompt import core
         drawn = []
-        drop = core.screen_backdrop(lambda: drawn.append(ui.get_terminal_size()))
+        drop = core.screen_backdrop(lambda: (core.screen_invalidate(), drawn.append(ui.get_terminal_size())))   # as a real redraw: the screen's own cells
         resized = iter([False, True, False, False])
         try:
             with patch.object(ui, 'consume_resize', lambda: next(resized, False)):

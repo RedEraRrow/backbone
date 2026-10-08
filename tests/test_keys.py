@@ -72,13 +72,13 @@ class KeysTest(unittest.TestCase):
         self.assertEqual(keys.label("t_player.back"), "b/esc")              # b/B is one key to the reader
         self.assertEqual(keys.label("t_player.up", "t_player.down"), "↑↓")
         keys.bind("t_player.next", ("/",))
-        keys.bind("t_player.prev", (keys.of("global.help_typed")[0],))     # ^/: crashed the old parser
+        keys.bind("t_player.prev", ("\x1f",))                             # ^/: crashed the old parser
         hint = keys.label("t_player.prev", "t_player.next")
         self.assertEqual(hint, "^///")                                # ^/, the separator, /
-        self.assertEqual([t[2] for t in pc._hint_key_tokens(hint)], [keys.of("global.help_typed")[0], "/"])
+        self.assertEqual([t[2] for t in pc._hint_key_tokens(hint)], ["\x1f", "/"])
         cells: dict = {}
         pc.add_hint_click_cells(cells, f"[{hint}] prev/next", 3, [(hint, "prev/next")])
-        self.assertEqual(sorted(set(cells.values())), sorted([keys.of("global.help_typed")[0], "/"]))
+        self.assertEqual(sorted(set(cells.values())), sorted(["\x1f", "/"]))
 
     def test_fixed_and_event_keys_cant_be_bound(self):
         self.assertFalse(keys.bindable("CTRL_C"))

@@ -558,7 +558,8 @@ def _select_flat(message: str, choices: list, *,
         """The preview's width moved a few columns, if need be, so the edge
         between the browser's box and the preview's isn't under the showing
         tab (whose outline opens into the box under it: ui.tab_notch); the
-        shorter way, as far as both keep their least. Else as it was."""
+        shorter way, as far as both keep their least. Where neither way
+        fits, no preview (0): a box cut by the tab is no box."""
         notch = ui.tab_notch() if pw else None
         if not notch:
             return pw
@@ -573,7 +574,7 @@ def _select_flat(message: str, choices: list, *,
         move = right - (a - mh - 1)                          # the preview's corner at the tab's left side
         if _cols() - pw - move - mh - 4 - trails_w >= _COL_MAIN_MIN[0]:
             fits.append(pw + move)
-        return min(fits, key=lambda w: abs(w - pw)) if fits else pw
+        return min(fits, key=lambda w: abs(w - pw)) if fits else 0
 
     def _contents_box(pv, width: int, height: int, title: bool = True) -> list:
         """What the highlighted row holds, in a box `width` × `height`."""

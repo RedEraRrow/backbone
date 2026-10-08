@@ -10,7 +10,7 @@ from backbone.prompt.core import (
     block_cursor, block_cursor_width, _read_key, _cols, _wrap_bordered_input_lines,
     screen_paint, screen_invalidate, screen_takeover_next,
     box_lines, screen_restore, screen_save, screen_span_paint, box_fits, help_corner_text,
-    relayout_under_overlay, redraw_under_overlay, overlay_layer,
+    relayout_under_overlay, redraw_under_overlay, overlay_layer, screen_crosses_box,
 )
 from backbone import keys, ui
 from backbone.prompt import chrome
@@ -217,7 +217,9 @@ def _overlay_place(h: int, widest: int) -> dict:
     if h == 1:
         w = cols
     top, left = max(1, (rows - h) // 2 + 1), max(1, (cols - w) // 2 + 1)
-    alone = not box_fits()          # a window too small for boxes: the box takes it, nothing half-covered beside it
+    # A window too small for boxes, or a box under it would be cut through
+    # (half a box is no box): it takes the window, the screen under it put back after.
+    alone = not box_fits() or screen_crosses_box(top, top + h - 1, left, left + w - 1)
     if alone:
         sys.stdout.write("\033[H\033[2J")
         screen_invalidate()
@@ -332,7 +334,7 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
     `rows` (Choices; a disabled one is shown dim and passed over) each ticked
     or not (`checked`, their values), then any `actions` (Choices) under a
     rule. ↑ ↓ move; Space or Enter ticks a row, Enter on an action picks it;
-    Esc closes. Returns (the values ticked, the action picked or None); the
+    Esc closes, as does a window too small for its box. Returns (the values ticked, the action picked or None); the
     screen under it is put back cell by cell."""
     checked = set(checked)
     items = list(rows) + list(actions)
@@ -367,14 +369,11 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
 
     def _render() -> None:
         body = _lines()
-        if place['h'] == 1:                      # no room for a box: the row the cursor's on
-            lines = [ui.clip_ansi(f"{C.DIM}{title}:{C.RESET} " + ui.strip_ansi(body[min(at + (at >= len(rows) and bool(actions)), len(body) - 1)]), place['w'])]
-        else:
-            room = place['h'] - 2
-            line_at = at + (1 if actions and at >= len(rows) else 0)
-            first = max(0, min(line_at - room + 1, len(body) - room)) if line_at >= room else 0
-            lines = [ln[ui.MARGIN_H:] for ln in box_lines(body[first:first + room], place['w'], place['h'], title,
-                                                          _overlay_keys(title, hint, place['w']))]
+        room = place['h'] - 2
+        line_at = at + (1 if actions and at >= len(rows) else 0)
+        first = max(0, min(line_at - room + 1, len(body) - room)) if line_at >= room else 0
+        lines = [ln[ui.MARGIN_H:] for ln in box_lines(body[first:first + room], place['w'], place['h'], title,
+                                                      _overlay_keys(title, hint, place['w']))]
         lines = [ln + " " * max(0, place['w'] - ui.visual_len(ln)) for ln in lines]
         sys.stdout.write("".join(screen_span_paint(place['top'] + k, place['left'], ln)
                                  for k, ln in enumerate(lines)))
@@ -385,12 +384,12 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
     try:
         _set_raw(fd)
         _open()
-        _render()
-        while True:
+        while place['h'] >= 3:                     # no box, no list: it closes (as Esc) where one won't fit
+            _render()
             if ui.consume_resize():
                 relayout_under_overlay()
                 _open()
-                _render()
+                continue
             if not _wait_for_keypress(0.05):
                 continue
             key = _read_key(fd)
@@ -403,9 +402,6 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
             elif key == 'ENTER':
                 picked = items[at].value
                 break
-            else:
-                continue
-            _render()
     finally:
         _close_layer()                             # first: what's put back is the screen's own
         _overlay_close(place)

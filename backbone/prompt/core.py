@@ -668,6 +668,21 @@ def screen_forget_pictures() -> None:
     _shown_pictures.clear()
 
 
+_BORDER_CHARS = set("╭╮╰╯│─├┤┬┴┼┊┈")
+
+
+def screen_crosses_box(first_row: int, last_row: int, first_col: int, last_col: int) -> bool:
+    """Whether any box's border on screen lies in the rectangle (1-based,
+    inclusive): something drawn there would cut that box, leaving it half a
+    box. A rectangle wholly inside one box's inside crosses nothing."""
+    for r in range(first_row, last_row + 1):
+        cells = _cells.get(r) or []
+        for c in range(first_col - 1, min(last_col, len(cells))):
+            if cells[c] is not _UNKNOWN and cells[c][1] in _BORDER_CHARS:
+                return True
+    return False
+
+
 def screen_save(first_row: int, last_row: int, first_col: int, last_col: int) -> dict:
     """What the painter holds in a rectangle, to put back with screen_restore
     once something drawn over it (an overlay) is gone."""
@@ -828,15 +843,41 @@ _cramped_showing = [0]                  # the miniplayer is up (nested: a screen
 
 def set_cramped_view(fn) -> None:
     """Register ``fn()``: what shows while a window is too small for any
-    screen's boxes, returning once they fit again (the miniplayer)."""
+    screen's boxes, returning once they fit again (the miniplayer). With
+    none, a box saying the window's too small (_too_small_notice)."""
     _cramped_view[0] = fn
 
 
 def _too_small() -> bool:
     """The screen on top can't keep its boxes (it doesn't lay out small
-    windows itself) and the miniplayer is to show instead."""
+    windows itself), so the miniplayer, or the notice, shows instead."""
     top = _backdrops[-1] if _backdrops else None
-    return _cramped_view[0] is not None and not box_fits() and not (top and top['small'])
+    return not box_fits() and not (top and top['small'])
+
+
+_TOO_SMALL_NOTE = "Make the window bigger"
+
+
+def _too_small_notice() -> None:
+    """A tool with no miniplayer, in a window too small for its screen's
+    boxes: a box saying so where one fits, else nothing (no box, no
+    content), till the window grows. Keys wait; Ctrl-C still stops."""
+    fd = sys.stdin.fileno()
+    drawn = None
+    while not box_fits():
+        size = ui.get_terminal_size()
+        if size != drawn:
+            cols, rows = size
+            w = ui.visual_len(_TOO_SMALL_NOTE) + 4
+            sys.stdout.write("\033[H\033[2J")
+            if rows >= 3 and cols >= w:
+                top, left = (rows - 3) // 2 + 1, (cols - w) // 2 + 1
+                box = box_lines([f"{C.DIM}{_TOO_SMALL_NOTE}{C.RESET}"], w, 3)
+                sys.stdout.write("".join(f"\033[{top + k};{left}H{ln[ui.MARGIN_H:]}" for k, ln in enumerate(box)))
+            sys.stdout.flush()
+            drawn = size
+        if _byte_ready(fd, 0.1) and _read_key(fd) == 'CTRL_C':
+            raise KeyboardInterrupt
 
 
 _cramped = _too_small                   # a screen's paint is held back: the miniplayer shows instead
@@ -854,7 +895,7 @@ def _run_cramped() -> None:
     _cramped_showing[0] += 1
     log.debug("window too small for boxes: the miniplayer")
     try:
-        _cramped_view[0]()
+        (_cramped_view[0] or _too_small_notice)()
     finally:
         _cramped_showing[0] -= 1
         ui.set_tabs_hidden(tabs_were)
@@ -925,17 +966,20 @@ def _cols() -> int:
 
 
 # --- Hint bar visibility ------------------------------------------------------
-# One switch for every screen's hint bar, off until turned on (`?`, Ctrl-/ where
-# `?` is typed, or a click on the corner toggle each screen shows on its top
+# One switch for every screen's hint bar, off until turned on (`?`, Ctrl-/ or
+# Ctrl-G where `?` is typed, or a click on the corner toggle each screen shows on its top
 # line), remembered between runs.
 # Kept in its own small file rather than config.json: screens hold a loaded
 # config and save it back later, which would quietly undo a toggle made meanwhile.
 HINTS_CLICK = '\x00hints'     # the key a click on the corner toggle replays
+_TYPED_HELP_KEYS = (("\x07", "\x1f") if os.environ.get("TERM_PROGRAM") == "Apple_Terminal"
+                    else ("\x1f", "\x07"))
 keys.define("global", "Everywhere", [
-    # Wherever it isn't typed or bound; Ctrl-/ (the same key with Ctrl) is the
-    # way where it is, and works everywhere.
+    # Wherever it isn't typed or bound; where it is, Ctrl-/ (the same key with
+    # Ctrl), and Ctrl-G (nano's help key) for macOS's Terminal, which sends
+    # nothing for Ctrl-/. Both work everywhere; what's shown is the first.
     ("help", ("?",), "show or hide the key hints"),
-    ("help_typed", ("\x1f",), "show or hide the key hints, in a text field too"),
+    ("help_typed", _TYPED_HELP_KEYS, "show or hide the key hints, in a text field too"),
 ], within=())
 _hints_on: list = [None]      # None until first read
 
@@ -1004,7 +1048,7 @@ def set_help_toggle_shown(shown: bool) -> None:
 
 
 def is_hints_key(key: str, key_free: bool) -> bool:
-    """Whether `key` toggles the hints: a click on the corner, Ctrl-/, or `?`
+    """Whether `key` toggles the hints: a click on the corner, Ctrl-/ or Ctrl-G, or `?`
     where the screen leaves `?` free (not typed or bound)."""
     return (key == HINTS_CLICK or keys.pressed(key, "global.help_typed")
             or (key_free and keys.pressed(key, "global.help")))
@@ -1012,7 +1056,8 @@ def is_hints_key(key: str, key_free: bool) -> bool:
 
 def help_corner_text(help_key: bool = True, shown: bool | None = None) -> tuple[str, int]:
     """The header toggle, styled, and its width: `[?] help` / `[?] hide help`,
-    or `[^/] …` where `?` is typed (a text field) and Ctrl-/ is the key.
+    or `[^/] …` where `?` is typed (a text field) and Ctrl-/ is the key
+    (`[^g]`, Ctrl-G, in macOS's Terminal).
     `shown`: the hints' state to describe (default: as they are now).
     Nothing, when the toggle is switched off (help_toggle_shown)."""
     if not help_toggle_shown():
@@ -1038,7 +1083,7 @@ def add_help_corner(line: str, row: int, cells: dict, help_key: bool = False) ->
     """`line` (a screen's top line, drawn on screen row `row`) with the toggle
     right-aligned on it, clipping the line if the two would meet. Only the key
     is clickable (a click replays HINTS_CLICK). `help_key`: pressing `?` toggles
-    here; elsewhere `?` is typed or bound, and the toggle names Ctrl-/."""
+    here; elsewhere `?` is typed or bound, and the toggle names Ctrl-/ (or Ctrl-G)."""
     text, width = help_corner_text(help_key)
     if not width:                                    # the toggle is switched off
         if help_key:
@@ -1089,25 +1134,34 @@ def box_lines(lines: list[str], width: int, height: int, title: str = "", right:
     h, v = ("┈", "┊") if dotted else ("─", "│")
     inner = max(1, width - 4)                         # "│ " + content + " │"
     pad = " " * ui.MARGIN_H
+    # Nothing in a border is ever cut short. Short of room, whole parts give
+    # way, least first: the title's " · " parts after its name, then the
+    # right end's (a subtitle, a message), then the help toggle, then the name.
+    toggle = next((t for t, _w in _toggle_variants() if t and right.endswith(t)), "") if right else ""
+    sub = ui.strip_ansi(right[:len(right) - len(toggle)]).rstrip(" ─") if right else ""
+    tparts, sparts = (title.split(" · ") if title else []), (sub.split(" · ") if sub else [])
+
+    def fits(tp: list, sp: list, tg: str) -> bool:
+        name_w = ui.visual_len(" · ".join(tp)) + 2 if tp else 0
+        r = " ─ ".join(x for x in (" · ".join(sp), tg) if x)
+        return name_w + (ui.visual_len(r) + 3 if r else 0) <= width - 4
+
+    while not fits(tparts, sparts, toggle):
+        if len(tparts) > 1:
+            tparts = tparts[:-1]
+        elif sparts:
+            sparts = sparts[:-1]
+        elif toggle:
+            toggle = ""
+        elif tparts:
+            tparts = []
+        else:
+            break
+    title = " · ".join(tparts)
     name = f" {title} " if title else ""
-    # Short of room, the title and the right end (a subtitle, the help
-    # toggle) each keep up to half the border, the longer giving way first.
-    avail = width - 4 - 3
-    ln, lr = ui.visual_len(name), ui.visual_len(right)
-    if right and ln + lr > avail:
-        fit = avail - min(ln, max(avail // 2, avail - lr))
-        if lr > fit:
-            # The help toggle at its end stays whole (it's clicked, and found
-            # there by place_help_toggle); what's before it shortens.
-            toggle = next((t for t, _w in _toggle_variants() if t and right.endswith(t)), "")
-            head, tw = right[:len(right) - len(toggle)], ui.visual_len(toggle)
-            room_h = fit - tw
-            head = (_clip_ansi(head, room_h - 2) + f"{C.DIM}… {C.RESET}") if room_h > 4 else ""
-            right = head + toggle if tw <= fit else ""
+    sub = " · ".join(sparts)
+    right = (f"{C.DIM}{sub}{C.RESET}" if sub else "") + (f"{C.DIM} ─ {C.RESET}" if sub and toggle else "") + toggle
     tail = f" {right} ─" if right else ""
-    room = width - 4 - ui.visual_len(tail)
-    if ui.visual_len(name) > room:
-        name = (_clip_ansi(name, max(0, room - 2)) + "… ") if room > 2 else ""
     rule = max(1, width - 3 - ui.visual_len(name) - ui.visual_len(tail))
     shade = C.PRIMARY if focused else C.DIM
     tail = f"{C.DIM} {C.RESET}{right}{C.DIM} ─{C.RESET}" if right else ""
@@ -1119,6 +1173,18 @@ def box_lines(lines: list[str], width: int, height: int, title: str = "", right:
     body += [""] * (max(0, height - 2) - len(body))
     mid = [f"{pad}{C.DIM}{v}{C.RESET} {ln}{C.RESET}{' ' * (inner - ui.visual_len(ln))} {C.DIM}{v}{C.RESET}" for ln in body]
     return [top, *mid, f"{pad}{C.DIM}╰{h * (width - 2)}╯{C.RESET}"]
+
+
+def whole_parts(text: str, room: int) -> str:
+    """`text` as it is if it fits in `room` columns, else with whole " · "
+    parts dropped from the end till it does, else nothing: never cut short."""
+    parts = text.split(" · ")
+    while parts:
+        shown = " · ".join(parts)
+        if ui.visual_len(shown) <= room:
+            return shown
+        parts.pop()
+    return ""
 
 
 def border_right(subtitle: str | None, help_key: bool | None) -> str:
@@ -1396,6 +1462,10 @@ def place_help_toggle(out: list, first_row: int, cells: dict, help_key: bool = F
             if help_key:
                 cells['__help_key__'] = True
             return
+    if out and ui.strip_ansi(out[0]).lstrip().startswith("╭"):
+        if help_key:                                 # a box's border without it: it had no room (`?` still works)
+            cells['__help_key__'] = True
+        return
     if out:
         out[0] = add_help_corner(out[0], first_row, cells, help_key)
 

@@ -46,10 +46,14 @@ class BoxLinesTest(unittest.TestCase):
         self.assertTrue(plain[0].lstrip().startswith("╭─ Title ") and plain[0].endswith("─ [?] help ─╮"))
         self.assertTrue(plain[-1].lstrip().startswith("╰") and plain[-1].endswith("╯"))
 
-    def test_a_long_title_shortens(self):
+    def test_a_title_too_long_goes_whole_never_cut(self):
         top = ui.strip_ansi(core.box_lines([], 30, 2, "A title far too long for this narrow box")[0])
-        self.assertIn("…", top)
+        self.assertNotIn("…", top)
+        self.assertNotIn("A title", top)
         self.assertEqual(ui.visual_len(top), 30 + ui.MARGIN_H)
+        top = ui.strip_ansi(core.box_lines([], 18, 2, "Queue · 12 of 300")[0])
+        self.assertIn(" Queue ─", top)                                       # its name kept, the rest whole or gone
+        self.assertNotIn("12", top)
 
 
 class BoxedSelectTest(unittest.TestCase):
@@ -147,14 +151,18 @@ class ScrollColumnTest(unittest.TestCase):
 
 
 class BorderSqueezeTest(unittest.TestCase):
-    def test_the_title_and_the_toggle_outlast_the_subtitle(self):
+    def test_the_title_and_the_toggle_outlast_the_subtitle_and_nothing_is_cut(self):
         right = core.border_right("A long subtitle here", True)
-        for width in (80, 40, 30, 24):
+        for width in (80, 40, 30, 28):
             top = ui.strip_ansi(core.box_lines([], width, 3, "Atom Heart", right)[0])
             self.assertEqual(ui.visual_len(top), width + ui.MARGIN_H, width)     # never past its box
             self.assertTrue(top.rstrip().endswith("╮"), top)
-            self.assertIn("help", top, width)                                    # the toggle, whole
-            self.assertIn("Atom", top, width)
+            self.assertIn("[?] help", top, width)                                # the toggle, whole
+            self.assertIn(" Atom Heart ", top, width)                            # the title, whole
+            self.assertNotIn("…", top, width)                                    # nothing cut short
+        narrow = ui.strip_ansi(core.box_lines([], 20, 3, "Atom Heart", right)[0])
+        self.assertIn(" Atom Heart ", narrow)                                    # the toggle goes before the title
+        self.assertNotIn("help", narrow)
         self.assertIn("A long subtitle here", ui.strip_ansi(core.box_lines([], 80, 3, "T", right)[0]))
 
 
@@ -515,10 +523,63 @@ class CrampedTest(unittest.TestCase):
             screen()
         self.assertEqual(drawn, ['screen'])
 
-    def test_nothing_registered_nothing_changes(self):
-        core.set_cramped_view(None)
-        with patch.object(core, 'box_fits', lambda: False):
-            self.assertFalse(core._cramped())                                # another tool keeps its screens
+    def test_with_no_miniplayer_a_notice_stands_in(self):
+        core.set_cramped_view(None)                                          # a tool without one (backcrack)
+        shown = []
+        with patch.object(core, 'box_fits', lambda: False), \
+             patch.object(core, '_too_small_notice', lambda: shown.append(True)), \
+             patch.object(ui, 'request_relayout'):
+            self.assertTrue(core._cramped())                                 # still no screen without its boxes
+            core._wait_for_keypress(0)
+        self.assertEqual(shown, [True])
+
+    def test_the_notice_is_boxed_or_nothing(self):
+        for cols, rows, boxed in ((40, 5, True), (12, 5, False), (40, 2, False)):
+            out = io.StringIO()
+            fits = iter([False, True])
+            with patch.object(core, 'box_fits', lambda: next(fits)), \
+                 patch.object(ui, 'get_terminal_size', lambda *a: (cols, rows)), \
+                 patch.object(core, '_byte_ready', lambda *a: False), \
+                 patch.object(core.sys.stdin, 'fileno', lambda: 0), patch.object(sys, 'stdout', out):
+                core._too_small_notice()
+            text = ui.strip_ansi(out.getvalue())
+            self.assertEqual("Make the window bigger" in text, boxed, (cols, rows))
+            self.assertEqual("╭" in text, boxed, (cols, rows))                # the words only ever in their box
+
+
+
+class OverlayCutTest(unittest.TestCase):
+    """An overlay never leaves half a box: where it would cut a box's border
+    it has the window to itself."""
+
+    def setUp(self):
+        core.screen_invalidate()
+        self.size = patch.object(ui, 'get_terminal_size', lambda *a: (40, 12))
+        self.size.start()
+        core.screen_row_paint(1, "")
+
+    def tearDown(self):
+        self.size.stop()
+        core.screen_invalidate()
+
+    def test_a_border_inside_the_rectangle_is_a_cut(self):
+        core.screen_row_paint(4, "  ╭──────────╮")
+        core.screen_row_paint(5, "  │ inside   │")
+        self.assertTrue(core.screen_crosses_box(3, 6, 1, 20))              # over the border
+        self.assertFalse(core.screen_crosses_box(5, 5, 5, 10))             # within the box's inside
+        self.assertFalse(core.screen_crosses_box(8, 9, 1, 20))             # clear of it
+
+
+class HelpToggleRoomTest(unittest.TestCase):
+    def test_a_border_with_no_room_for_the_toggle_keeps_its_corner(self):
+        out = [core.box_lines([], 20, 3, "Browse", core.border_right(None, True))[0]]
+        cells: dict = {}
+        with patch.object(core, 'help_toggle_shown', lambda: True):
+            core.place_help_toggle(out, 1, cells, help_key=True)
+        top = ui.strip_ansi(out[0])
+        self.assertTrue(top.rstrip().endswith("╮"), top)                     # not clipped for a toggle
+        self.assertNotIn("help", top)
+        self.assertTrue(cells.get('__help_key__'))                           # `?` still toggles
 
 
 if __name__ == "__main__":

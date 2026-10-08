@@ -144,7 +144,7 @@ def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
 
     The bar is empty unless hints are switched on; either way the top line
     (`out[0]`) carries the corner toggle. `help_key`: this screen leaves `?` free,
-    so `?` toggles and the corner says so; otherwise it names Ctrl-/.
+    so `?` toggles and the corner says so; otherwise it names Ctrl-/ (or Ctrl-G).
     """
     items = chrome_hint_pairs(pairs)
     hint_lines = _hint(*items, extra=extra).splitlines()
