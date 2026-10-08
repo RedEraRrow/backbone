@@ -188,7 +188,7 @@ class ColumnBrowserTest(unittest.TestCase):
             self.assertTrue(moved <= notch[0] - 2 or moved >= notch[1], (notch, moved))   # clear of it
             self.assertLessEqual(abs(moved - here), 10)                                # only a nudge
 
-    def test_the_levels_above_line_up_with_the_list(self):
+    def test_the_levels_above_start_at_the_top_whether_or_not_the_list_has_scrolled(self):
         def rows_of(frame, *words):
             return [next(k for k, line in enumerate(frame) if w in line) for w in words]
         _res, frame, _seen = self._frame(160)
@@ -197,8 +197,8 @@ class ColumnBrowserTest(unittest.TestCase):
         many = [prompt.Choice(title=f"Row {i}", value=i) for i in range(1, 60)]
         with patch.object(self, 'CHOICES', many):
             _res, frame, _seen = self._frame(160, keys=('END', 'ESC'), rows=20)
-        first = next(k for k, line in enumerate(frame) if "above" in line) + 1
-        self.assertEqual(rows_of(frame, "Artists")[0], first)              # scrolled: level with the first row shown
+        above = next(k for k, line in enumerate(frame) if "above" in line)
+        self.assertEqual(rows_of(frame, "Artists")[0], above)              # scrolled: still at the top, not moved down by "N above"
 
     def test_widths_follow_content(self):
         pv = prompt.Preview(lambda w, h: [], want=10)
@@ -431,6 +431,94 @@ class PathBoxTest(unittest.TestCase):
         self.assertTrue(all(len(l) <= 16 for l in lines))
         self.assertEqual(lines[0], "/Users/me/Music/")                       # broken at a slash
         self.assertEqual(core.wrap_path("/" + "a" * 12, 5), ["/", "aaaaa", "aaaaa", "aa"])   # a long name, cut
+
+
+
+class OverPictureTest(unittest.TestCase):
+    """Something drawn over a picture writes every cell it covers: an image
+    shows through any cell left unwritten, blank or not."""
+
+    def setUp(self):
+        core.screen_invalidate()
+        self.size = patch.object(ui, 'get_terminal_size', lambda *a: (40, 10))
+        self.size.start()
+        core.screen_row_paint(1, "")                                        # the size settled: no resize wipe after
+
+    def tearDown(self):
+        core._shown_pictures.clear()
+        core.screen_picture_area('test', None)
+        self.size.stop()
+        core.screen_invalidate()
+
+    def _blank_cells_written(self, row):
+        core.screen_row_paint(row, " " * 40)                               # blank where the image is
+        out = core.screen_span_paint(row, 5, "│" + " " * 10 + "│")          # a box's blank inside over it
+        return ui.strip_ansi(re.sub(r'\x1b\[\d+;\d+H', '|', out))
+
+    def test_a_listed_picture(self):
+        core._shown_pictures[:] = [(3, 8, 4, 'k', '', 20)]                  # rows 3-6, columns 8-27
+        self.assertEqual(self._blank_cells_written(4).count(" "), 8)        # the blanks over it (8-15) too
+        self.assertEqual(self._blank_cells_written(8).count(" "), 0)        # a row clear of it: only changes
+
+    def test_a_picture_another_screen_drew(self):
+        core.screen_picture_area('test', (2, 1, 5, 40))
+        self.assertEqual(self._blank_cells_written(3).count(" "), 10)
+        core.screen_picture_area('test', None)
+        self.assertEqual(self._blank_cells_written(3).count(" "), 0)
+
+
+
+class CrampedTest(unittest.TestCase):
+    """A window too small for a screen's boxes gives way to the miniplayer:
+    the screen's frames are held back, and the miniplayer runs till they fit."""
+
+    def setUp(self):
+        self.ran = []
+        core.set_cramped_view(lambda: self.ran.append(core._cramped_showing[0]))
+
+    def tearDown(self):
+        core.set_cramped_view(None)
+
+    def test_too_small_runs_the_miniplayer_and_holds_frames_back(self):
+        with patch.object(core, 'box_fits', lambda: False), patch.object(ui, 'request_relayout') as relayout:
+            self.assertTrue(core._cramped())
+            self.assertFalse(core._wait_for_keypress(0))
+            self.assertEqual(self.ran, [1])                                  # it ran, flagged as showing
+            relayout.assert_called_once()                                    # and the screen lays out again after
+        self.assertEqual(self.ran, [1])
+
+    def test_only_the_screen_on_top_decides(self):
+        player = core.screen_backdrop(None, small=True)                       # lays out small windows itself
+        try:
+            with patch.object(core, 'box_fits', lambda: False):
+                self.assertFalse(core._cramped())
+                opened = core.screen_backdrop(None)                           # a screen it opens: like any other
+                self.assertTrue(core._cramped())
+                layer = core.overlay_layer()                                  # a box over that: any size
+                self.assertFalse(core._cramped())
+                layer()
+                opened()
+                self.assertFalse(core._cramped())                             # back to the player's say
+        finally:
+            player()
+        with patch.object(core, 'box_fits', lambda: True):
+            self.assertFalse(core._cramped())                                # boxes fit: nothing to do
+
+    def test_an_overlay_redraws_the_screen_under_it(self):
+        drawn = []
+        screen = core.screen_backdrop(lambda: drawn.append('screen'))
+        layer = core.overlay_layer()
+        try:
+            core.redraw_under_overlay()
+        finally:
+            layer()
+            screen()
+        self.assertEqual(drawn, ['screen'])
+
+    def test_nothing_registered_nothing_changes(self):
+        core.set_cramped_view(None)
+        with patch.object(core, 'box_fits', lambda: False):
+            self.assertFalse(core._cramped())                                # another tool keeps its screens
 
 
 if __name__ == "__main__":

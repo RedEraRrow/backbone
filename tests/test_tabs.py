@@ -138,14 +138,24 @@ class BarTest(unittest.TestCase):
     def test_very_narrow_keeps_inside_the_window(self):
         self.assertLessEqual(max(map(ui.visual_len, self._bar(12, on=1))), 12)
 
-    def test_a_moved_title_short_of_room_is_shortened_not_lost(self):
-        row = ([("", " ")] * 2 + [("", "╭"), ("", "─")] + [("", c) for c in " A long title for a field "]
+    def _moved(self, title, after=22):
+        row = ([("", " ")] * 2 + [("", "╭"), ("", "─")] + [("", c) for c in f" {title} "]
                + [("", "─")] * 10 + [("", c) for c in " help "] + [("", "─"), ("", "╮")])
-        core._title_right(row, 2, len(row) - 1, 22)
+        core._title_right(row, 2, len(row) - 1, after)
         text = "".join(c for _s, c in row)
-        self.assertIn("A long title…", text)                  # cut to the room, with a …
         self.assertTrue(text.rstrip().endswith("help ─╮"))
         self.assertEqual(len(row), len(text))
+        return text
+
+    def test_a_moved_title_short_of_room_loses_whole_parts_never_a_cut_one(self):
+        text = self._moved("Queue · 1 of 28", after=20)
+        self.assertIn(" Queue ─", text)                      # the part that fits, whole
+        self.assertNotIn("1 of", text)
+        self.assertNotIn("…", text)
+        text = self._moved("A long title for a field")      # one part, too long: no title at all
+        self.assertNotIn("A long", text)
+        self.assertNotIn("…", text)
+        self.assertIn("Queue · 1 of 28", self._moved("Queue · 1 of 28", after=4))   # room: all of it
 
     def test_where_the_tab_is_follows_a_resize_before_any_paint(self):
         with patch.object(nav, 'TABS', [(n, None) for n in self.NAMES]), \

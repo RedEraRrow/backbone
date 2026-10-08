@@ -79,20 +79,22 @@ _command_line = None
 
 
 def set_command_line(fn) -> None:
-    """Register a ``callable()`` that `:` opens, where a screen leaves it free.
-    It returns whether it opened a screen of its own (the screen under it then
-    needs drawing again)."""
+    """Register a ``callable(around=None)`` that `:` opens, where a screen
+    leaves it free. It returns whether it opened a screen of its own (the
+    screen under it then needs drawing again), opening it inside `around()`
+    when given."""
     global _command_line
     _command_line = fn
 
 
-def open_command_line() -> bool | None:
-    """Run the registered command line: whether it opened a screen of its own;
-    None when there is none to run here (none registered, or a screen that
-    keeps you in it, nav.modal())."""
+def open_command_line(around=None) -> bool | None:
+    """Run the registered command line: whether it opened a screen of its own
+    (inside the context `around()`, when given: the player steps out of view
+    only for that); None when there is none to run here (none registered, or
+    a screen that keeps you in it, nav.modal())."""
     if _command_line is None or nav.is_modal():
         return None
-    return bool(_command_line())
+    return bool(_command_line(around=around) if around else _command_line())
 
 
 # --- shared widget chrome -------------------------------------------------

@@ -45,6 +45,13 @@ def _sigwinch_handler(signum: int, frame: Any) -> None:
     _last_resize_signal = _time.monotonic()
 
 
+def request_relayout() -> None:
+    """Have the next consume_resize() say yes: a screen that missed a resize
+    (something over it took the signal) lays itself out again."""
+    global _resize_flag
+    _resize_flag = True
+
+
 def last_resize_signal_at() -> float:
     """Monotonic time of the last resize report, to tell whether one arrived
     while something slow was under way."""
@@ -663,10 +670,11 @@ def set_tab_keys_shown(fn) -> None:
 _tabs_hidden = [False]
 
 
-def set_tabs_hidden(hidden: bool) -> None:
+def set_tabs_hidden(hidden: bool) -> bool:
     """Leave the tab bar off the screen (a full-screen view that offers it,
-    like a player); its keys still switch tabs."""
-    _tabs_hidden[0] = hidden
+    like a player); its keys still switch tabs. Returns what it was."""
+    was, _tabs_hidden[0] = _tabs_hidden[0], hidden
+    return was
 
 
 _focused = [True]                  # the terminal's window has focus (its focus reports, when it sends them)

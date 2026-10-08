@@ -10,6 +10,7 @@ from backbone.prompt.core import (
     block_cursor, block_cursor_width, _read_key, _cols, _wrap_bordered_input_lines,
     screen_paint, screen_invalidate, screen_takeover_next,
     box_lines, screen_restore, screen_save, screen_span_paint, box_fits, help_corner_text,
+    relayout_under_overlay, redraw_under_overlay, overlay_layer,
 )
 from backbone import keys, ui
 from backbone.prompt import chrome
@@ -216,7 +217,32 @@ def _overlay_place(h: int, widest: int) -> dict:
     if h == 1:
         w = cols
     top, left = max(1, (rows - h) // 2 + 1), max(1, (cols - w) // 2 + 1)
-    return dict(top=top, left=left, w=w, h=h, saved=screen_save(top, top + h - 1, left, left + w - 1))
+    alone = not box_fits()          # a window too small for boxes: the box takes it, nothing half-covered beside it
+    if alone:
+        sys.stdout.write("\033[H\033[2J")
+        screen_invalidate()
+    return dict(top=top, left=left, w=w, h=h, alone=alone,
+                saved=screen_save(top, top + h - 1, left, left + w - 1))
+
+
+def _overlay_close(place: dict) -> None:
+    """Put back what an overlay covered: the cells under it, or, where it had
+    the window to itself, the whole screen under it drawn again."""
+    if not place:
+        return
+    if place.get('alone'):                  # the window was the box's alone: cleared, then the screen drawn whole
+        sys.stdout.write("\033[H\033[2J")
+        screen_invalidate()
+        redraw_under_overlay()
+    else:
+        sys.stdout.write(screen_restore(place['saved']))
+    sys.stdout.flush()
+
+
+def _overlay_keys(title: str, keys: str, width: int) -> str:
+    """An overlay's keys for its border, dim: none when they and the title
+    won't both fit whole (the title says what the box is; the keys go)."""
+    return f"{C.DIM}{keys}{C.RESET}" if ui.visual_len(title) + ui.visual_len(keys) + 10 <= width else ""
 
 
 def token_completions(text: str, names: dict, open: str = "%", close: str = "%") -> list[tuple[str, str]]:
@@ -247,20 +273,23 @@ def overlay_text(message: str, default: str = "", hint: str = "↵ run · esc",
 
     def _render() -> None:
         boxed = place['h'] == 3
+        # The border holds the title whole before the keys: short of room for
+        # both, the keys go.
+        keys_hint = _overlay_keys(message, hint, place['w'])
         prefix = "" if boxed else f"{C.DIM}:{C.RESET} "
         inner = place['w'] - (4 if boxed else ui.visual_len(prefix) + 1)
         text = "".join(buf)
         start = max(0, pos - inner + 1)             # scrolled to keep the caret in view
         shown = block_cursor(text[start:start + inner], pos - start)
         if boxed:
-            lines = [ln[ui.MARGIN_H:] for ln in box_lines([shown], place['w'], 3, message, f"{C.DIM}{hint}{C.RESET}")]
+            lines = [ln[ui.MARGIN_H:] for ln in box_lines([shown], place['w'], 3, message, keys_hint)]
             titled = message.strip() in ui.strip_ansi(lines[0])
         else:
             titled = False
         if not text and (placeholder or not titled):  # an example, or what it's for when the title's cut
             shown = block_cursor(ui.truncate_text(placeholder or message, max(1, inner)), 0, base=C.DIM) + C.RESET
             if boxed:
-                lines = [ln[ui.MARGIN_H:] for ln in box_lines([shown], place['w'], 3, message, f"{C.DIM}{hint}{C.RESET}")]
+                lines = [ln[ui.MARGIN_H:] for ln in box_lines([shown], place['w'], 3, message, keys_hint)]
         if not boxed:                               # no room for a box: the field across one row
             lines = [prefix + shown + " " * max(0, inner - ui.visual_len(shown))]
         sys.stdout.write("".join(screen_span_paint(place['top'] + k, place['left'], ln)
@@ -268,13 +297,14 @@ def overlay_text(message: str, default: str = "", hint: str = "↵ run · esc",
         sys.stdout.flush()
 
     result = None
+    _close_layer = overlay_layer()                 # over the screen showing; it meets any size itself
     try:
         _set_raw(fd)
         _open()
         _render()
         while True:
             if ui.consume_resize():
-                sys.stdout.write(screen_restore(place['saved']))
+                relayout_under_overlay()
                 _open()
                 _render()
             if not _wait_for_keypress(0.05):
@@ -290,7 +320,8 @@ def overlay_text(message: str, default: str = "", hint: str = "↵ run · esc",
                 pos = new_pos
                 _render()
     finally:
-        sys.stdout.write(screen_restore(place['saved']) if place else "")
+        _close_layer()                             # first: what's put back is the screen's own
+        _overlay_close(place)
         sys.stdout.flush()
         _restore_term_attrs(fd, old)
     return result
@@ -312,7 +343,7 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
     fd = sys.stdin.fileno()
     old = _get_term_attrs(fd)
     place: dict = {}
-    hint = f"{C.DIM}space tick · ↵ · esc{C.RESET}"
+    hint = "space tick · ↵ · esc"
 
     def _lines() -> list:
         out = []
@@ -331,7 +362,8 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
 
     def _open() -> None:
         place.update(_overlay_place(len(items) + (1 if actions else 0) + 2,
-                                    max(24, max(ui.visual_len(str(c.title)) for c in items) + 12)))
+                                    max(24, max(ui.visual_len(str(c.title)) for c in items) + 12,
+                                        ui.visual_len(title) + ui.visual_len(hint) + 10)))   # its keys in the border too
 
     def _render() -> None:
         body = _lines()
@@ -341,20 +373,22 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
             room = place['h'] - 2
             line_at = at + (1 if actions and at >= len(rows) else 0)
             first = max(0, min(line_at - room + 1, len(body) - room)) if line_at >= room else 0
-            lines = [ln[ui.MARGIN_H:] for ln in box_lines(body[first:first + room], place['w'], place['h'], title, hint)]
+            lines = [ln[ui.MARGIN_H:] for ln in box_lines(body[first:first + room], place['w'], place['h'], title,
+                                                          _overlay_keys(title, hint, place['w']))]
         lines = [ln + " " * max(0, place['w'] - ui.visual_len(ln)) for ln in lines]
         sys.stdout.write("".join(screen_span_paint(place['top'] + k, place['left'], ln)
                                  for k, ln in enumerate(lines)))
         sys.stdout.flush()
 
     picked = None
+    _close_layer = overlay_layer()                 # over the screen showing; it meets any size itself
     try:
         _set_raw(fd)
         _open()
         _render()
         while True:
             if ui.consume_resize():
-                sys.stdout.write(screen_restore(place['saved']))
+                relayout_under_overlay()
                 _open()
                 _render()
             if not _wait_for_keypress(0.05):
@@ -373,7 +407,8 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
                 continue
             _render()
     finally:
-        sys.stdout.write(screen_restore(place['saved']) if place else "")
+        _close_layer()                             # first: what's put back is the screen's own
+        _overlay_close(place)
         sys.stdout.flush()
         _restore_term_attrs(fd, old)
     return checked, picked
@@ -567,12 +602,12 @@ keys.define("multiline", "Text of several lines", [
     ("save", ("\x13",), "save"),
     ("find", ("\x06",), "find"),
     ("replace", ("\x12",), "find and replace"),
-    ("external", ("\x05",), "open it in the system editor ($EDITOR)"),
+    ("external", ("\x05",), "open it in the system editor, $EDITOR"),
 ])
 # In the find box: plain text or a pattern (a regular expression), and
 # replacing every match at once.
 keys.define("multiline_find", "Text of several lines: find", [
-    ("pattern", ("\x14",), "plain text / pattern (regular expression)"),
+    ("pattern", ("\x14",), "plain text or a regular expression"),
     ("all", ("\x01",), "replace every match"),
 ], within=("multiline",))
 

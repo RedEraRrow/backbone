@@ -9,7 +9,7 @@ from typing import Any, Callable, Literal, overload
 from backbone.prompt.core import (
     _COLUMNS_MAX_WIDTH, _EDGE_MARGIN, _get_term_attrs, _set_raw, _restore_term_attrs,
     _wait_for_keypress, _table_widths, _render_table_row, _clip_ansi, _norm, block_cursor,
-    _read_key, _visible_rows, _cols, _Widget, _hint_pin_target, screen_takeover_next,
+    _read_key, _visible_rows, _cols, _Widget, _hint_pin_target, screen_takeover_next, screen_backdrop,
     Choice, Column, JumpTo, PanelTitle, Trail, border_right, box_fits, box_lines, boxed_frame, column_widths,
     COL_GAP, _COL_MAIN_MIN, _COL_PREVIEW, _LIST_ROWS_MIN, _SHAPE_SAMPLE, _STRIP_SPLIT, strip_rows,
     columns_shown, help_corner_text, panel_header, rounded_header, set_columns_shown, trail_lines,
@@ -83,14 +83,14 @@ keys.define("list", "Lists", [
     ("top", ("HOME",), "first row"),
     ("bottom", ("END",), "last row"),
     ("choose", ("ENTER", "RIGHT"), "choose the row"),
-    ("toggle", ("SPACE",), "tick the row (lists with ticks)"),
-    ("toggle_all", ("a", "A"), "tick or clear every row (lists with ticks)"),
+    ("toggle", ("SPACE",), "tick the row, in lists with ticks"),
+    ("toggle_all", ("a", "A"), "tick or clear every row, in lists with ticks"),
     ("back", ("ESC", "b", "LEFT"), "back"),
     ("quit", ("q", "Q"), "quit the app"),
     ("sections", ("/",), "a long list's sections, or the whole list"),
     ("row_options", ("o",), "everything you can do with the row"),
     ("list_options", ("O",), "everything you can do with the whole list"),
-    ("columns", ("v",), "side columns on or off (lists that have them)"),
+    ("columns", ("v",), "side columns on or off, in lists that have them"),
 ])
 # The live search lists: typing goes into the query, so their keys are the
 # ones that can't be typed.
@@ -108,7 +108,7 @@ keys.define("confirm", "Yes/no questions", [
     ("yes", ("y", "Y"), "yes"),
     ("no", ("n", "N"), "no"),
     ("default", ("ENTER",), "the default answer"),
-    ("back", ("ESC",), "back (answers no)"),
+    ("back", ("ESC",), "back, answering no"),
 ])
 L = keys.label
 
@@ -620,7 +620,8 @@ def _select_flat(message: str, choices: list, *,
     def _browser_rows(body, shown, main_in, height, first, lead) -> list:
         """The column browser's rows inside its box: the levels above that fit
         (`shown`: (trail, width)), then the list (`body`, its rows' margin
-        dropped), the levels' rows level with the list's (`lead` lines down).
+        dropped), the levels' rows from the top of the box (`lead` lines down:
+        the message), not moved by the list's "N above".
         Records where each column landed (_col_geo), for clicks."""
         sep = f" {C.DIM}│{C.RESET} "
         x = 1 + ui.MARGIN_H + 2                  # the screen column inside "│ "
@@ -814,7 +815,7 @@ def _select_flat(message: str, choices: list, *,
         for line, col, rows, key, esc, *size in getattr(h_lines, 'pictures', ()):
             w.pictures.append((1 + ui.top_margin() + line, col + 1, rows, key, esc, *size))
         if boxed and (shown or pw or strip_h):
-            browser = box_lines(_browser_rows(out, shown, main_in, box_h - 2, first, len(pre) + (viewport > 0)),
+            browser = box_lines(_browser_rows(out, shown, main_in, box_h - 2, first, len(pre)),
                                 browser_w, box_h, box_title, box_right)
             if pw:
                 browser = [b + p for b, p in zip(browser, _preview_column(pview, pw, box_h, browser_w, first))]
@@ -842,17 +843,22 @@ def _select_flat(message: str, choices: list, *,
 
     result = None
     _sel_last_click: int | None = None
+    _drop_backdrop = lambda: None      # noqa: E731 (none until the loop's first frame)
     try:
         _set_raw(fd)
         enable_mouse()
         screen_takeover_next()   # paint over the previous screen, no flash
         w.render(_lines())
 
+        def _relaid() -> None:
+            ui.clear_screen()
+            w.anchor_reset()
+            w.render(_lines())
+        _drop_backdrop = screen_backdrop(_relaid)
+
         while True:
             if ui.consume_resize():
-                ui.clear_screen()
-                w.anchor_reset()
-                w.render(_lines())
+                _relaid()
                 continue
 
             if not _wait_for_keypress(0.05):
@@ -1101,6 +1107,7 @@ def _select_flat(message: str, choices: list, *,
                     w.render(_lines())
 
     finally:
+        _drop_backdrop()
         disable_mouse()
         _restore_term_attrs(fd, old)
         w.clear()
@@ -1351,11 +1358,15 @@ def live_select(message: str, provider: Callable[[str], list], *,
         screen_takeover_next()   # paint over the previous screen, no flash
         w.render(_lines())
 
+        def _relaid() -> None:
+            ui.clear_screen()
+            w.anchor_reset()
+            w.render(_lines())
+        _drop_backdrop = screen_backdrop(_relaid)
+
         while True:
             if ui.consume_resize():
-                ui.clear_screen()
-                w.anchor_reset()
-                w.render(_lines())
+                _relaid()
                 continue
             if not _wait_for_keypress(0.05):
                 continue

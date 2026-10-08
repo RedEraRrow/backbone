@@ -8,7 +8,7 @@ import textwrap
 import time
 import select as _sel
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from backbone import keys, nav, ui
 from backbone.log import log, enabled as _logging, quietly
@@ -110,6 +110,7 @@ def screen_invalidate() -> None:
         _screen_size[0] = size
     _reserved.clear()                    # a frame after this reserves afresh
     _shown_pictures.clear()              # a clear took them with it
+    _picture_areas.clear()
     _float.clear()
     _screen.clear()
     _cells.clear()
@@ -140,6 +141,7 @@ def _resize_wipe() -> str:
     _screen.clear()
     _cells.clear()
     _shown_pictures.clear()
+    _float.clear()                       # the wipe takes a floating box with it; it isn't drawn back at the old place
     return "\033[H\033[2J" if was is not None else ""
 
 
@@ -301,7 +303,8 @@ def _notched(cells: list, notch: tuple) -> list:
 def _title_right(cells: list, left: int, right: int, after: int) -> None:
     """Move a box's top-border title (" Title ", just after its corner) to
     the right end of the border, before what's already there (a subtitle,
-    the help toggle), past column `after`; drop it if it won't fit."""
+    the help toggle), past column `after`: shortened by whole " · " parts
+    where it won't fit, and dropped where even its first won't."""
     if left + 2 >= right or cells[left + 1][1] not in _EDGE or cells[left + 2][1] != " ":
         return
     end = next((i for i in range(left + 3, right) if cells[i][1] in _EDGE and cells[i - 1][1] == " "), None)
@@ -312,11 +315,10 @@ def _title_right(cells: list, left: int, right: int, after: int) -> None:
         cells[i] = dash
     stop = next((i for i in range(end, right) if cells[i][1] not in _EDGE), right) - 1
     room = stop - (after + 2)                          # columns between the tab and what's at the right
-    if len(title) > room >= 8:                         # shortened, rather than lost: " Tag ID (e.g. …"
-        title = title[:room - 2] + [(title[room - 3][0], "…"), title[-1]]
-        while title[-3][1] == "":                      # never half a wide character before the …
-            title[-3:-2] = []
-            title.insert(-2, (title[-2][0], " "))
+    if len(title) > room:                              # never cut short: whole " · " parts off the end, else none
+        cuts = [i for i in range(len(title) - 2, 0, -1)
+                if (title[i - 1][1], title[i][1], title[i + 1][1]) == (" ", "·", " ") and i <= room]
+        title = title[:cuts[0]] if cuts else []        # " Queue · 1 of 28 " → " Queue "
     start = stop - len(title)
     if start > after + 1:
         cells[start:stop] = title
@@ -356,6 +358,9 @@ def screen_span_paint(row: int, col: int, text: str) -> str:
     before = list(new)
     if old is None:                                  # unknown row: the span's cells all written
         before = [_UNKNOWN] * len(new)
+    for first, last in _picture_cols(row):           # an image is there, whatever the cells say:
+        for k in range(max(first, col) - 1, min(last, col - 1 + len(span))):
+            before[k] = _UNKNOWN                     # write them all, or it shows through the blanks
     new[col - 1:col - 1 + len(span)] = span
     _cells[row] = new
     _screen[row] = _screen.get(row, "") + "\x00span"          # the row's text no longer says it all
@@ -507,12 +512,65 @@ def screen_float(lines: list, seconds: float) -> None:
     cols, rows = ui.get_terminal_size()
     lines = [ui.clip_ansi(ln, cols) for ln in lines[:rows]]
     w = max((ui.visual_len(ln) for ln in lines), default=0)
-    place = dict(w=w, top=max(1, (rows - len(lines)) // 2 + 1), left=max(1, (cols - w) // 2 + 1))
-    if _float and (len(_float['lines']), _float['w'], _float['top'], _float['left']) != (
+    place = dict(w=w, top=max(1, (rows - len(lines)) // 2 + 1), left=max(1, (cols - w) // 2 + 1), size=(cols, rows))
+    if _float and _float['size'] == (cols, rows) and (len(_float['lines']), _float['w'], _float['top'], _float['left']) != (
             len(lines), place['w'], place['top'], place['left']):
-        _float_gone()                # a new shape: put back what the old one covered first
+        _float_gone()                # a new shape: put back what the old one covered (not at a new size: those cells are gone)
     _float.update(lines=lines, until=time.time() + seconds, **place)
     _float_draw()
+
+
+_backdrops: list = []                # the screens showing, innermost last: their redraw, and how they meet a small window
+
+
+def screen_backdrop(redraw, small: bool = False) -> Callable[[], None]:
+    """Say the screen now showing is this one, till the returned call (for
+    its `finally`) takes it back. `redraw()` lays it out afresh at the current
+    size, what an overlay over it calls on a resize; None: it notices a new
+    size itself (asked to with ui.request_relayout). `small`: it lays out a
+    window too small for boxes itself (the player, the miniplayer), so no
+    miniplayer takes over from it."""
+    entry = {'redraw': redraw, 'small': small, 'overlay': False}
+    _backdrops.append(entry)
+    return lambda: _backdrops.remove(entry) if entry in _backdrops else None
+
+
+def overlay_layer() -> Callable[[], None]:
+    """An overlay opening over the screen showing: it meets any size itself,
+    and what it redraws under it is that screen. Returns the call that closes
+    the layer, made before the screen under it is put back."""
+    entry = {'redraw': None, 'small': True, 'overlay': True}
+    _backdrops.append(entry)
+    return lambda: _backdrops.remove(entry) if entry in _backdrops else None
+
+
+def _screen_under_overlay() -> dict | None:
+    """The screen an overlay is over (or the top one, with none open)."""
+    return next((e for e in reversed(_backdrops) if not e['overlay']), None)
+
+
+def relayout_under_overlay() -> None:
+    """The window was resized while an overlay is open: the screen under it
+    lays itself out at the new size, where it can keep its boxes (smaller,
+    the overlay has the window to itself). The overlay then places itself
+    afresh over what's there now."""
+    _float.clear()                       # a floating box goes; its owner shows it again if it's still wanted
+    if box_fits():
+        redraw_under_overlay()
+
+
+def redraw_under_overlay() -> None:
+    """The screen under an overlay drawn again, whole, at the current size:
+    by its redraw, or, with none to call, cleared and asked to lay itself out
+    (it notices at its next resize check)."""
+    under = _screen_under_overlay()
+    if under and under['redraw'] is not None:
+        under['redraw']()
+        return
+    sys.stdout.write("\033[H\033[2J")
+    sys.stdout.flush()
+    screen_invalidate()
+    ui.request_relayout()
 
 
 def screen_float_close() -> None:
@@ -578,6 +636,26 @@ def float_tick() -> bool:
     return True
 
 
+_picture_areas: dict = {}            # pictures other screens draw themselves: name → (top, left, rows, cols)
+
+
+def screen_picture_area(name: str, area: tuple | None) -> None:
+    """Say a screen drawing its own picture (the player's cover) has one at
+    `area` (top, left, rows, cols; 1-based), or None now it's gone: anything
+    drawn over it then writes every cell, so none of the image shows through."""
+    if area:
+        _picture_areas[name] = area
+    else:
+        _picture_areas.pop(name, None)
+
+
+def _picture_cols(row: int) -> list[tuple[int, int]]:
+    """The columns (first, last; 1-based) of `row` a picture covers."""
+    return ([(c, c + size[0] - 1 if size else 10 ** 6)
+             for r, c, n, _k, _esc, *size in _shown_pictures if r <= row < r + n]
+            + [(c, c + w - 1) for r, c, n, w in _picture_areas.values() if r <= row < r + n])
+
+
 def screen_forget_pictures() -> None:
     """For a screen that draws without _Widget (a player view): forget the
     cells under the pictures the last widget drew, so this screen's paint
@@ -640,6 +718,8 @@ def screen_paint(rows: dict, *, cursor: tuple | None = None,
     inputs); `save_cursor` wraps the frame in DEC save/restore so a caret
     elsewhere is left alone (background repaints).
     """
+    if _cramped():                     # a frame without its boxes: the miniplayer shows instead
+        return
     rows = _takeover_rows(rows)
     parts: list[str] = []
     for row in sorted(rows):
@@ -722,6 +802,8 @@ def _render_footer_bar() -> None:
     change lands) when nothing else redraws. Repaints when either the track
     identity or the styled rows changed, so an idle screen never flickers yet a
     new song is never missed."""
+    if _chrome_held():                     # the miniplayer has the window
+        return
     rows = ui.get_terminal_height()
     cols = ui.get_terminal_width()
     lines = ui.footer_lines(cols)
@@ -736,11 +818,71 @@ def _render_footer_bar() -> None:
         sys.stdout.flush()
 
 
+# A window too small for a screen's boxes: the screen gives way to the
+# miniplayer (a tool registers it), which keeps the window till the boxes fit
+# again. A screen that lays out small windows itself (the player) says so
+# when it registers (screen_backdrop small=True).
+_cramped_view = [None]
+_cramped_showing = [0]                  # the miniplayer is up (nested: a screen opened from it, then it again)
+
+
+def set_cramped_view(fn) -> None:
+    """Register ``fn()``: what shows while a window is too small for any
+    screen's boxes, returning once they fit again (the miniplayer)."""
+    _cramped_view[0] = fn
+
+
+def _too_small() -> bool:
+    """The screen on top can't keep its boxes (it doesn't lay out small
+    windows itself) and the miniplayer is to show instead."""
+    top = _backdrops[-1] if _backdrops else None
+    return _cramped_view[0] is not None and not box_fits() and not (top and top['small'])
+
+
+_cramped = _too_small                   # a screen's paint is held back: the miniplayer shows instead
+
+
+def _chrome_held() -> bool:
+    """The now-playing box and status line stay off: the miniplayer has the window."""
+    return _too_small() or _cramped_showing[0] > 0
+
+
+def _run_cramped() -> None:
+    """The miniplayer until the boxes fit, then the screen under it laid out
+    afresh (its next resize check says yes)."""
+    tabs_were = ui.set_tabs_hidden(True)                 # the miniplayer alone
+    _cramped_showing[0] += 1
+    log.debug("window too small for boxes: the miniplayer")
+    try:
+        _cramped_view[0]()
+    finally:
+        _cramped_showing[0] -= 1
+        ui.set_tabs_hidden(tabs_were)
+        sys.stdout.write("\033[H\033[2J")
+        sys.stdout.flush()
+        screen_invalidate()
+        ui.request_relayout()
+
+
+_wheel_at: list = [None]               # (row, col) of the last wheel or trackpad scroll
+
+
+def wheel_at() -> tuple | None:
+    """Where the last SCROLL_UP / SCROLL_DOWN happened, (row, col) 1-based:
+    for a screen with more than one thing to scroll."""
+    return _wheel_at[0]
+
+
 def _wait_for_keypress(timeout: float = 0.05) -> bool:
     """Block up to `timeout` seconds for a keypress; return whether one arrived.
 
     Also refreshes the now-playing box at ~4 Hz so background-audio status
-    stays live on every widget/menu without each one needing its own tick."""
+    stays live on every widget/menu without each one needing its own tick.
+    In a window too small for the screen's boxes, the miniplayer instead
+    (returning no key once the screen's back)."""
+    if _cramped():
+        _run_cramped()
+        return False
     now = time.time()
     if now - _footer_last_draw[0] >= 0.12:
         _footer_last_draw[0] = now
@@ -1532,6 +1674,8 @@ def footer_click_action(row: int, col: int) -> str | None:
 def render_status_bar():
     """Redraw the bottom status bar in place, saving/restoring the cursor so
     the text input caret doesn't move."""
+    if _chrome_held():                     # the miniplayer has the window
+        return
     rows = ui.get_terminal_height()
     float_tick()
     if rows <= 0 or not ui.chrome_fits():             # too short a window: its rows are the screen's
@@ -2050,8 +2194,9 @@ def _read_key_raw(fd: int) -> str:
                                     btn, col, row = int(parts[0]), int(parts[1]), int(parts[2])
                                     if c == 'm':
                                         return f'MOUSE_RELEASE:{btn}:{row}:{col}'
-                                    if btn == 64: return 'SCROLL_UP'
-                                    if btn == 65: return 'SCROLL_DOWN'
+                                    if btn in (64, 65):
+                                        _wheel_at[0] = (row, col)
+                                        return 'SCROLL_UP' if btn == 64 else 'SCROLL_DOWN'
                                     if btn in (0, 1, 2): return f'MOUSE_CLICK:{btn}:{row}:{col}'
                                 except ValueError:
                                     pass
@@ -2184,6 +2329,8 @@ class _Widget:
         status bar) are left exactly as they are instead of being wiped and
         restamped on every keystroke.
         """
+        if _cramped():                       # a frame without its boxes: the miniplayer shows instead
+            return
         mv   = ui.MARGIN_V
         top  = ui.top_margin()
         rows = ui.get_terminal_height()
