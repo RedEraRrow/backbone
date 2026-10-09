@@ -20,6 +20,13 @@ keys.define("global", "Everywhere", [
     ("player", ("\x0f",), "open the player"),
     ("raw_text", ("\x14",), "switch a value between its editor and raw text"),
 ], within=())
+# The volume, on any screen that leaves these keys free (a list, the player,
+# the miniplayer; not a text field, where they're typed). Its own group, so a
+# key a screen binds for itself isn't taken from it.
+keys.define("volume", "Volume", [
+    ("up", ("+", "="), "volume up"),
+    ("down", ("-", "_"), "volume down"),
+], within=())
 
 # The one key pair that moves a row up or down, wherever a list's order can be
 # changed (select's on_move, list_edit).
@@ -193,8 +200,8 @@ def boxed_chrome(body: list, title: str, pairs, cells: dict, *, extra: str = "",
 def consume_chrome(key: str, cells: dict, free_keys: bool = False):
     """Handle a transport key, a now-playing box click, a click on a hint key,
     or a click on the tab bar. With `free_keys` (a screen that has no other use
-    for them), also Tab / Shift-Tab and the digits for the tabs, and `:` for
-    the command line.
+    for them), also Tab / Shift-Tab and the digits for the tabs, `:` for the
+    command line, and the volume (+ / -).
 
     Returns :data:`CHROME_HANDLED` when the key is fully dealt with,
     :data:`CHROME_REDRAW` when the caller should also repaint, the synthesised
@@ -233,6 +240,10 @@ def consume_chrome(key: str, cells: dict, free_keys: bool = False):
         return CHROME_REDRAW
     if act in ("global.playpause", "global.next", "global.prev") and _transport_handler is not None:
         _transport_handler(act.split(".")[1])
+        return CHROME_HANDLED
+    vol = keys.action(key, "volume") if free_keys and isinstance(key, str) else None
+    if vol in ("volume.up", "volume.down") and _transport_handler is not None:
+        _transport_handler("vol_up" if vol == "volume.up" else "vol_down")
         return CHROME_HANDLED
 
     if isinstance(key, str) and key.startswith('MOUSE_CLICK:'):

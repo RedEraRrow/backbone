@@ -1,5 +1,6 @@
 """Boxed panels: the box itself, and select() drawing its list inside one."""
 import io
+import time
 import re
 import sys
 import unittest
@@ -404,6 +405,25 @@ class FloatTest(unittest.TestCase):
             ui.print_inline_progress("Measuring", 0.5)                   # the command line: the inline bar
         self.assertTrue(out.getvalue().startswith("\r"))
         self.assertFalse(core._float)
+
+    def test_a_pulse_takes_it_away_on_time_too(self):
+        """With music playing, state-change pulses come faster than the idle
+        tick: each one must do the tick's work, or the box never goes."""
+        import os as _os
+        out = io.StringIO()
+        with patch.object(sys, 'stdout', out):
+            core.screen_float(["[ VOL ]"], 60)
+        core._float['until'] = 0                                            # its time is up
+        r, w = _os.pipe()
+        _os.write(w, b"x")
+        try:
+            with patch.object(core, '_wake_r', r), patch.object(core, '_footer_last_draw', [time.time()]), \
+                 patch.object(core, '_render_footer_bar', lambda: None), \
+                 patch.object(core._sel, 'select', lambda *a: ([r], [], [])), patch.object(sys, 'stdout', out):
+                core._wait_for_keypress(0)
+        finally:
+            _os.close(r); _os.close(w)
+        self.assertFalse(core._float)                                       # gone, though no idle tick was due
 
     def test_rows_painted_under_it_leave_it_be_and_come_back_after(self):
         row = "x" * 40

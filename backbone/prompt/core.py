@@ -914,6 +914,25 @@ def wheel_at() -> tuple | None:
     return _wheel_at[0]
 
 
+def _idle_tick() -> None:
+    """What every screen's wait does at ~8 Hz, and at once on a state change
+    (a pulse): the now-playing box repainted, a floating box taken away when
+    its time is up, and the background-activity notice kept live (re-stamped
+    while a task runs so its ● pulses; once more after the last, to clear it).
+    One routine for both, so frequent pulses (music playing) can't starve any
+    of it. Each part on its own: one failing mustn't stop the rest."""
+    _footer_last_draw[0] = time.time()
+    with quietly():
+        _render_footer_bar()
+    with quietly():
+        float_tick()
+    active = ui.has_background_tasks()
+    if active or _status_prev_active[0]:
+        with quietly():
+            render_status_bar()
+    _status_prev_active[0] = active
+
+
 def _wait_for_keypress(timeout: float = 0.05) -> bool:
     """Block up to `timeout` seconds for a keypress; return whether one arrived.
 
@@ -924,20 +943,8 @@ def _wait_for_keypress(timeout: float = 0.05) -> bool:
     if _cramped():
         _run_cramped()
         return False
-    now = time.time()
-    if now - _footer_last_draw[0] >= 0.12:
-        _footer_last_draw[0] = now
-        with quietly():
-            _render_footer_bar()
-            float_tick()
-        # Keep the background-activity notice live: while a task is running the
-        # status bar is re-stamped each tick so it stays up for the whole job and
-        # its cyan ● pulses; one extra redraw after the last task clears the bar.
-        active = ui.has_background_tasks()
-        if active or _status_prev_active[0]:
-            with quietly():
-                render_status_bar()
-        _status_prev_active[0] = active
+    if time.time() - _footer_last_draw[0] >= 0.12:
+        _idle_tick()
     if _IS_WINDOWS:
         end = time.time() + timeout
         while time.time() < end:
@@ -952,9 +959,7 @@ def _wait_for_keypress(timeout: float = 0.05) -> bool:
             os.read(_wake_r, 4096)        # drain all coalesced pulses
         except OSError:
             pass
-        _footer_last_draw[0] = time.time()    # this pulse counts as the tick
-        with quietly():
-            _render_footer_bar()     # repaint immediately on a state change
+        _idle_tick()                      # a state change: the tick's work now (the box repainted at once)
     return sys.stdin in ready             # a wake alone is not a keypress
 
 

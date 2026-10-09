@@ -86,5 +86,24 @@ class KeysTest(unittest.TestCase):
         self.assertTrue(keys.bindable("n"))
 
 
+
+class VolumeKeysTest(unittest.TestCase):
+    """+ and - turn the volume on any screen that leaves them free, never in
+    a text field (where they're typed)."""
+
+    def test_free_screens_turn_it_typing_ones_do_not(self):
+        from backbone.prompt import chrome
+        got = []
+        was = chrome._transport_handler
+        chrome.set_transport_handler(got.append)
+        try:
+            self.assertIs(chrome.consume_chrome("+", {}, free_keys=True), chrome.CHROME_HANDLED)
+            self.assertIs(chrome.consume_chrome("-", {}, free_keys=True), chrome.CHROME_HANDLED)
+            self.assertIsNone(chrome.consume_chrome("+", {}))              # typed here: not ours
+        finally:
+            chrome.set_transport_handler(was)
+        self.assertEqual(got, ["vol_up", "vol_down"])
+
+
 if __name__ == "__main__":
     unittest.main()
