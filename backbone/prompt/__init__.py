@@ -8,7 +8,7 @@ from backbone.prompt.core import (  # noqa: F401
 )
 from backbone.prompt.chrome import (  # noqa: F401
     CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, move_hint,
-    append_chrome, boxed_chrome, chrome_hint_lines, chrome_hint_pairs, consume_chrome, inner_rule,
+    append_chrome, boxed_chrome, chrome_hint_lines, chrome_room, chrome_hint_pairs, consume_chrome, inner_rule,
     disable_mouse, enable_mouse,
     open_command_line, set_activity_opener, set_command_line, set_player_opener, set_transport_handler,
 )
@@ -19,3 +19,7 @@ from backbone.prompt.dates import calendar_select, datetime_edit  # noqa: F401
 from backbone.prompt.values import fraction_edit, number_edit, rating_edit, time_edit  # noqa: F401
 from backbone.prompt.audio import equaliser_edit, rva2_edit  # noqa: F401
 from backbone.prompt.keymap import keys_editor  # noqa: F401
+from backbone.prompt.settings import (  # noqa: F401
+    ACCENT_COLUMNS, OFF_GLYPH, ON_GLYPH, SETTINGS_COLUMNS, accent_name, accent_swatch, index_of,
+    pick_accent, pick_option, space_toggles, state_glyph,
+)

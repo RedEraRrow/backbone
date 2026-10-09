@@ -139,6 +139,12 @@ def chrome_hint_lines(pairs, *, extra: str = "") -> list:
     return _hint(*chrome_hint_pairs(pairs), extra=extra).splitlines()
 
 
+def chrome_room(pairs, *, extra: str = "") -> int:
+    """The rows a widget's frame has above its hint bar (append_chrome), for a
+    screen laying out its own boxes."""
+    return _hint_pin_target() - len(chrome_hint_lines(pairs, extra=extra))
+
+
 def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
                   pin: bool = True, help_key: bool = False) -> list:
     """Append the hint bar to a widget's rendered `out` lines, in place.
@@ -191,7 +197,7 @@ def boxed_chrome(body: list, title: str, pairs, cells: dict, *, extra: str = "",
         out = header + [f"  {C.DIM}{title}{C.RESET}"] + list(body)
         append_chrome(out, pairs, cells, extra=extra, help_key=help_key)
         return out, 0
-    box_h = max(3, _hint_pin_target() - len(header) - len(chrome_hint_lines(pairs, extra=extra)))
+    box_h = max(3, chrome_room(pairs, extra=extra) - len(header))
     out = boxed_frame(header, list(body), title, box_h, help_key and not header)
     append_chrome(out, pairs, cells, extra=extra, help_key=help_key)
     return out, 2

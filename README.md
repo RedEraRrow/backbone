@@ -42,6 +42,13 @@ with `set_accent` (an `ACCENT_PRESETS` key or `#RRGGBB`); a tool calls it once
 at startup from its own settings, and `accent_code` / `accent_label` let a
 settings screen check and name a value.
 
+**`prompt.settings`** - what a Settings screen is built from, so every
+tool's reads the same: `SETTINGS_COLUMNS` (a name, then its state),
+`state_glyph` (● / ○), `space_toggles` (space flips the on/off rows),
+`index_of` (the cursor back on the row just changed), `pick_option` (one of
+a fixed set of values) and `pick_accent` (the accent colour picker, each
+colour shown in itself).
+
 `from backbone import ...` exposes only a subset of `ui` (`Colors`, the
 margins and glyph sets, `spinner`, `content_width`, `rule`, `bar`,
 `header_box`, `wrap_margins`); import anything else from its module, e.g.
@@ -104,12 +111,16 @@ family (for typo scoring); raw key reads and escape decoding.
 through the same `_Widget` machinery every prompt widget uses, rather than each
 tool hand-rolling a redraw loop:
 
-    from backbone.prompt.core import run_dashboard
+    from backbone.prompt.chrome import chrome_room
+    from backbone.prompt.core import box_lines, run_dashboard
+    from backbone.ui import content_width
+
+    HINTS = [("q", "quit")]
 
     def render() -> list:
-        return ["  line one", "  line two"]
+        return box_lines(["line one", "line two"], content_width(), 4, "Status")
 
-    run_dashboard(render, interval=1.0, quit_key="q")
+    run_dashboard(render, interval=1.0, quit_action="list.quit", hints=HINTS)
 
 `render()` returns the whole frame as a list of lines, each carrying its own
 left indent, and only runs once per `interval`. Keypresses and resizes are
@@ -117,6 +128,10 @@ checked every 50ms regardless, so a resize repaints and a `q` quits at once
 instead of waiting out the data-refresh cadence. `on_key` handles anything
 other than the quit key and is free to open a `select()` or `confirm()` of its
 own; the dashboard repaints from scratch when it returns.
+
+With `hints`, the hint bar goes under the frame as every other screen's does,
+with the help toggle and clickable keys; `chrome_room(hints)` is the rows the
+frame has above it. A window too small for boxes gets backbone's own notice.
 
 When stdin isn't a terminal (run from a script, or with input redirected),
 it falls back to a plain sleep loop and never reads keys, so such a view has

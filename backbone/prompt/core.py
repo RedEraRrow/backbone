@@ -2493,7 +2493,7 @@ hint = _hint   # the public name for the hint bar
 
 
 def run_dashboard(render, interval: float = 1.0, quit_action: str = "list.quit", on_quit=None,
-                  poll: float = 0.05, on_key=None) -> None:
+                  poll: float = 0.05, on_key=None, hints=None) -> None:
     """Runs a live, tick-driven view through a _Widget, so it resizes and
     paints like every other widget here. Returns when a key of the
     `quit_action` binding (see backbone.keys) is pressed.
@@ -2511,6 +2511,12 @@ def run_dashboard(render, interval: float = 1.0, quit_action: str = "list.quit",
     back, raw mode undone) - the place for a "stop the background work
     too?" confirm().
 
+    `hints`, if given, are the view's (key, label) pairs, or a callable giving
+    them (for keys that can be rebound while it runs): they go in the hint
+    bar under the frame (append_chrome), which the help toggle and clicks on
+    its keys work like every other screen's. `render()` then lays its boxes
+    out in chrome_room(hints) rows.
+
     When stdin is not a terminal, keys can't be read: it renders on a plain
     time.sleep(interval) loop and never checks for the quit key, so the
     caller has to be stopped from outside.
@@ -2521,8 +2527,20 @@ def run_dashboard(render, interval: float = 1.0, quit_action: str = "list.quit",
     if is_tty:
         _set_raw(fd)
 
+    from backbone.prompt.chrome import (CHROME_HANDLED, CHROME_REDRAW, append_chrome,
+                                        consume_chrome, disable_mouse, enable_mouse)
+    cells: dict = {}
+
+    def frame() -> list:
+        lines = render()
+        if hints is None:
+            return lines
+        return append_chrome(lines, hints() if callable(hints) else hints, cells, help_key=True)
+
     w = _Widget(fd)
     screen_takeover_next()
+    if is_tty and hints is not None:
+        enable_mouse()
     last_render = 0.0
     try:
         while True:
@@ -2532,21 +2550,35 @@ def run_dashboard(render, interval: float = 1.0, quit_action: str = "list.quit",
                 w.anchor_reset()
             now = time.monotonic()
             if resized or now - last_render >= interval:
-                w.render(render())
+                w.render(frame())
                 last_render = now
             if is_tty:
                 if _wait_for_keypress(poll):
                     key = _read_key(fd)
+                    if hints is not None:
+                        chrome = consume_chrome(key, cells)
+                        if chrome is CHROME_HANDLED:
+                            continue
+                        if chrome is CHROME_REDRAW:
+                            w.anchor_reset()
+                            last_render = 0.0
+                            continue
+                        key = chrome or key          # a clicked hint: its key
                     if keys.pressed(key, quit_action):
                         break
                     if on_key is not None:
                         on_key(key)
                         ui.clear_screen()
                         w.anchor_reset()
+                        last_render = 0.0
+                        if hints is not None:
+                            enable_mouse()           # the screen it opened may have turned it off
             else:
                 time.sleep(interval)
     finally:
         if is_tty:
+            if hints is not None:
+                disable_mouse()
             _restore_term_attrs(fd, old_settings)
         sys.stdout.write("\033[?25h\n")
 
