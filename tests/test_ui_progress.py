@@ -64,13 +64,20 @@ if __name__ == "__main__":
 class ProgressBarSpanTest(unittest.TestCase):
     def test_span_is_accent_up_to_now_then_dim(self):
         bar = ui.get_progress_bar(0.5, 20, (0.4, 0.7))
-        self.assertEqual(ui.strip_ansi(bar), "[" + "━" * 14 + " " * 6 + "]")
+        self.assertEqual(ui.strip_ansi(bar), "[" + "━" * 14 + "─" * 6 + "]")
         self.assertIn(f"{ui.Colors.ACCENT}━━{ui.Colors.RESET}", bar)       # cells 8-9: played
-        self.assertIn(f"{ui.Colors.DIM}━━━━ ", bar)                         # cells 10-13: to come, then empty
+        self.assertIn(f"{ui.Colors.DIM}━━━━──", bar)                        # cells 10-13: to come, then the rest
 
     def test_cells_alone_take_a_rest_glyph(self):
-        cells = ui.strip_ansi(ui.progress_cells(0.5, 10, (0.3, 0.8), rest="─"))
+        cells = ui.strip_ansi(ui.progress_cells(0.5, 10, (0.3, 0.8)))
         self.assertEqual(cells, "━" * 8 + "──")
+
+    def test_whole_cells_only(self):
+        self.assertEqual(ui.strip_ansi(ui.progress_cells(0.44, 10)), "━━━━──────")
+        self.assertEqual(ui.strip_ansi(ui.progress_cells(0.46, 10)), "━━━━━─────")
+
+    def test_a_boxed_bar_drops_its_caps(self):
+        self.assertEqual(ui.strip_ansi(ui.get_progress_bar(0.5, 4, caps=False)), "━━──")
 
     def test_no_span_is_unchanged(self):
         self.assertNotIn(ui.Colors.ACCENT, ui.get_progress_bar(0.5, 20))

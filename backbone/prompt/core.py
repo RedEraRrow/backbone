@@ -590,7 +590,7 @@ def progress_float(message: str, progress: float) -> None:
     w = min(cols, _PROGRESS_W)
     boxed = rows >= 3 and w >= 16
     room = w - 4 if boxed else cols
-    bar = ui.get_progress_bar(progress, max(4, min(24, room // 3)))
+    bar = ui.get_progress_bar(progress, max(4, min(24, room // 3)), caps=not boxed)
     head = f"{ui.pulse_circle()} {bar} "
     text = head + C.DIM + ui.truncate_text(message, max(1, room - ui.visual_len(head))) + C.RESET
     text += " " * max(0, room - ui.visual_len(text))

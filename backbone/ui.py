@@ -1084,43 +1084,39 @@ def _get_breadcrumb_str(width: int) -> str:
 
 
 
-def get_progress_bar(progress: float, width: int = 40, span: tuple | None = None) -> str:
+def progress_caps(caps: bool) -> tuple[str, str]:
+    """A progress bar's end caps: brackets on a bare bar, none on one in a box
+    (the box already frames it)."""
+    return ("[", "]") if caps else ("", "")
+
+
+def progress_caps_width(caps: bool) -> int:
+    """Columns the caps add around a progress bar's cells."""
+    return sum(map(len, progress_caps(caps)))
+
+
+def get_progress_bar(progress: float, width: int = 40, span: tuple | None = None, caps: bool = True) -> str:
     """
     A pip-style progress bar.
-    [━━━━━━━━━━━━━━━━━━━━━━━━╸          ]
-    `span`: a section to pick out (see progress_cells).
+    [━━━━━━━━━━━━━━━━━━━━━━━━━──────────]
+    `span`: a section to pick out (see progress_cells). `caps`: see progress_caps.
     """
-    return f"{Colors.DIM}[{Colors.RESET}{progress_cells(progress, width, span)}{Colors.DIM}]{Colors.RESET}"
+    left, right = progress_caps(caps)
+    return f"{Colors.DIM}{left}{Colors.RESET}{progress_cells(progress, width, span)}{Colors.DIM}{right}{Colors.RESET}"
 
 
-def progress_cells(progress: float, width: int, span: tuple | None = None, rest: str = " ") -> str:
-    """A progress bar's `width` cells, coloured: what's played bright, the rest
-    `rest` (dim). `span`: (start, end) fractions of one section (a chapter) to
-    pick out: from its start to now in the accent colour, from now to its end dim."""
-    progress = max(0, min(1, progress))
-
-    filled_width = progress * width
-    whole_blocks = int(filled_width)
-    remainder = filled_width - whole_blocks
-
-    bar = "━" * whole_blocks
-
-    # half-cell tip
-    if whole_blocks < width:
-        if remainder > 0.6:
-            bar += "━" # Almost full
-        elif remainder > 0.2:
-            bar += "╸" # Partial tip
-        else:
-            bar += " " # Not enough for a tip yet
-
-    cells = [(Colors.PRIMARY, c) for c in bar.rstrip(" ")]
-    cells += [(Colors.DIM, rest)] * (width - len(cells))
+def progress_cells(progress: float, width: int, span: tuple | None = None) -> str:
+    """A progress bar's `width` cells: what's played heavy and bright, whole
+    cells only, the rest thin and dim. `span`: (start, end) fractions of one
+    section (a chapter) to pick out: from its start to now in the accent
+    colour, from now to its end dim."""
+    played = round(max(0, min(1, progress)) * width)
+    cells = [(Colors.PRIMARY, "━")] * played + [(Colors.DIM, "─")] * (width - played)
     if span:
         lo = max(0, min(width - 1, int(span[0] * width)))
         hi = max(lo + 1, min(width, round(span[1] * width)))
-        cells[lo:hi] = [(Colors.ACCENT, c) if colour == Colors.PRIMARY else (Colors.DIM, "━")
-                        for colour, c in cells[lo:hi]]
+        cells[lo:hi] = [(Colors.ACCENT, c) if i < played else (Colors.DIM, "━")
+                        for i, (_, c) in enumerate(cells[lo:hi], lo)]
     return "".join(f"{colour}{''.join(c for _, c in group)}{Colors.RESET}"
                    for colour, group in groupby(cells, key=lambda cell: cell[0]))
 
