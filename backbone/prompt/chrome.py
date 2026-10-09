@@ -115,20 +115,30 @@ CHROME_HANDLED = object()      # the key was consumed; carry on with the loop
 CHROME_REDRAW = object()       # consumed, and the caller should repaint fully
 
 
+def has_owner(action_id: str) -> bool:
+    """Whether an action does anything in this app: the transport and volume
+    keys need a transport handler installed, ^O a player to reopen. Every
+    other action belongs to a screen, so it does."""
+    if action_id in ("global.playpause", "global.next", "global.prev") or action_id.startswith("volume."):
+        return _transport_handler is not None
+    if action_id == "global.player":
+        return _player_opener is not None
+    return True
+
+
 def chrome_hint_pairs(pairs) -> list:
     """A widget's hint pairs plus the transport keys, while audio is playing.
 
-    Only keys that will actually do something are advertised: the transport trio
-    needs a handler installed and ^O needs a player to reopen. `unboxed` covers
+    Only keys that will actually do something are advertised (has_owner). `unboxed` covers
     a terminal too narrow to draw the now-playing box: the keys are still live,
     so they are still listed.
     """
     items = list(pairs.items()) if isinstance(pairs, dict) else [tuple(p) for p in pairs]
     if ui.footer_active() or ui.footer_unboxed():
-        if _transport_handler is not None:
+        if has_owner("global.playpause"):
             items += [(keys.label("global.playpause"), "play/pause"),
                       (keys.label("global.next", "global.prev"), "next/prev")]
-        if _player_opener is not None:
+        if has_owner("global.player"):
             items += [(keys.label("global.player"), "player")]
     return items
 

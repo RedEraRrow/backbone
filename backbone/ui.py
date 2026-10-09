@@ -103,8 +103,7 @@ MARGIN_V = 1   # rows reserved on each vertical side (top and bottom)
 FOOTER_GLYPH_COLS = ((0, 2), (4, 2))
 
 class Colors:
-    """The named palette every widget uses, plus semantic colours for a tool's
-    own views (FRAME, TEAL, AMBER, RED, TXT, MUTE) and the short aliases R and B.
+    """The named palette every widget uses, and RED for what failed.
     All empty when colour is off (NO_COLOR, or set_colour(False))."""
     PRIMARY = "\033[1;37m" # Bold white
     WHITE = "\033[37m" # Normal white
@@ -127,23 +126,14 @@ class Colors:
     BAR_DIM = "\033[48;5;235m"
     HIDE = "\033[?25l"
     SHOW = "\033[?25h"
-    # semantic colours for a tool's own views (backcrack's watch uses RED for failures)
-    FRAME = "\033[38;5;239m"
-    TEAL = "\033[38;5;43m"
-    AMBER = "\033[38;5;179m"
-    RED = "\033[38;5;167m"
-    TXT = "\033[38;5;252m"
-    MUTE = "\033[38;5;243m"
-    R = RESET            # short aliases
-    B = BOLD
+    RED = "\033[38;5;167m"   # a failure: a text field's problem, backcrack's FAIL lines
 
 
 # The styling half of Colors: everything that paints rather than moves the
 # cursor. Suppressing colour must not suppress HIDE/SHOW, which are cursor
 # control and still needed on a pipe.
 _STYLE_NAMES = ('PRIMARY', 'WHITE', 'ACCENT', 'ACCENT2', 'CYAN', 'YELLOW', 'MAGENTA', 'GREEN',
-                'DIM', 'BOLD', 'ITALIC', 'UNDERLINE', 'RESET', 'BACK', 'INVERT', 'BAR', 'BAR_DIM',
-                'FRAME', 'TEAL', 'AMBER', 'RED', 'TXT', 'MUTE', 'R', 'B')
+                'DIM', 'BOLD', 'ITALIC', 'UNDERLINE', 'RESET', 'BACK', 'INVERT', 'BAR', 'BAR_DIM', 'RED')
 _STYLE_CODES = {name: getattr(Colors, name) for name in _STYLE_NAMES}
 
 
@@ -1128,8 +1118,6 @@ C = Colors   # the short name every widget uses
 
 SPIN = list("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
-PARTS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]   # eighth-block fill steps
-
 SPARK = "▁▂▃▄▅▆▇█"
 
 def content_width(min_width: int = 1) -> int:
@@ -1139,21 +1127,6 @@ def content_width(min_width: int = 1) -> int:
     width, however narrow.
     """
     return max(min_width, get_terminal_width() - 2 * MARGIN_H)
-
-def rule(n: int) -> str:
-    return "─" * n
-
-def bar(pct: int, width: int, color: str = "") -> str:
-    color = color or Colors.TEAL
-    pct = max(0, min(100, pct))
-    eighths = pct * width * 8 // 100
-    full, rem = divmod(eighths, 8)
-    out = color + "█" * full
-    if rem and full < width:
-        out += PARTS[rem]
-        full += 1
-    out += Colors.MUTE + "─" * (width - full) + Colors.R
-    return out
 
 def rate_of_change(history: list, now: float, value: float, window: float = 20.0, max_len: int = 60):
     """Tracks `value` over time in `history` (a list of (ts, value) pairs,
@@ -1189,68 +1162,6 @@ def sparkline(rate_history: list, rate: float, max_len: int = 14) -> str:
     mx = max(rate_history, default=1) or 1
     return "".join(SPARK[max(0, min(7, int(r / mx * 7.99)))] for r in rate_history)
 
-def header_box(left: str, right: str, cols: int, spin: str = "") -> list:
-    """The 3-line rounded header frame (top rule, title row, bottom rule)
-    for a live view - `cols` is total frame width, i.e. content_width()'s
-    return value. The title row's padding is computed from the *actual*
-    rendered pieces (left, right, spin), so the right border always lands
-    exactly under the corners no matter how any of the three are sized -
-    this single spot is the only place that math needs to be right.
-
-    Truncates `left` (then `right`, if even that isn't enough) so the row
-    never runs past `cols` regardless of terminal width - `right` (typically
-    a short, fixed-format clock) is kept whole for as long as it can be;
-    `left` (the variable, more compressible piece - a title/library name)
-    gives way first.
-
-    Bakes in its own MARGIN_H left indent (matching every hand-written
-    widget line in backbone/prompt/ - e.g. confirm()'s
-    f"  {message}") rather than relying on a wrapper to add it: a caller
-    driving its view through _Widget.render() (prompt/core.py) gets no
-    such wrapper, since _Widget only manages the vertical margin itself.
-    """
-    interior = cols - 2
-    # Reserve the spinner plus one pad column *before* sizing left/right, so
-    # truncating to fit `budget` always leaves room for pad >= 1 - flooring
-    # pad afterward instead (max(1, ...)) can push the row a column past the
-    # border once left+right already exactly fill the interior.
-    budget = max(0, interior - len(spin) - 1)
-    if visual_len(left) + visual_len(right) > budget:
-        right = truncate_text(right, min(visual_len(right), budget))
-        left = truncate_text(left, max(0, budget - visual_len(right)))
-    pad = max(0, interior - visual_len(left) - visual_len(right) - len(spin))
-    C = Colors
-    hpad = " " * MARGIN_H
-    return [
-        f"{hpad}{C.FRAME}╭{rule(interior)}╮{C.R}",
-        f"{hpad}{C.FRAME}│{C.B}{left}{C.R}{' ' * pad}{C.TXT}{right}{C.R}{spin}{C.FRAME}│{C.R}",
-        f"{hpad}{C.FRAME}╰{rule(interior)}╯{C.R}",
-    ]
-
-def wrap_margins(lines: list, width: int = None) -> str:
-    """Applies the global MARGIN_H/MARGIN_V inset plus per-line
-    clear-to-end-of-line, ready for one `sys.stdout.write` - the standard
-    back* frame render (pair with an `ESC[H` cursor-home beforehand).
-
-    Joins with \\r\\n, not \\n: raw terminal mode (tty.setraw, used by
-    backbone.prompt.core for key reading) clears OPOST, so the terminal
-    stops translating a bare \\n into a carriage return - every line after
-    the first would otherwise start wherever the previous one ended instead
-    of column 1.
-
-    `width` (typically content_width()'s return value), if given, clips
-    every line to it first - a safety net so one field a caller forgot to
-    size itself can't overflow the whole frame. Hand-tuned per-field
-    truncation still reads better (an ellipsis where it makes sense, not a
-    hard cut mid-word); this is the guarantee behind it, not a replacement.
-    """
-    if width is not None:
-        lines = [clip_ansi(line, width) for line in lines]
-    hpad = " " * MARGIN_H
-    vpad = ["\033[K"] * MARGIN_V
-    out = vpad + [hpad + line + "\033[K" for line in lines] + vpad
-    return "\r\n".join(out)
-
 def spinner(frame: int) -> str:
     return SPIN[frame % len(SPIN)]
 
@@ -1276,33 +1187,13 @@ _ANSI_DEMO = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 
 
 def _demo() -> None:
-    """Self-check for the pure logic here, header_box's alignment above all.
+    """Self-check for the pure logic here.
     Runs without a terminal: `python3 -m backbone.ui`.
     """
-    for cols in (70, 100, 137):
-        for left, right, spin in (("  SHORT", "12:00:00  ", "X"), ("", "", ""), ("a" * 20, "b", "Y")):
-            top, mid, bot = header_box(left, right, cols, spin)
-            widths = {len(strip_ansi(top)), len(strip_ansi(mid)), len(strip_ansi(bot))}
-            assert len(widths) == 1, (cols, left, right, spin, widths)
-    # A left piece far longer than the frame must truncate, not overflow -
-    # the border still lines up at a width too narrow for it whole.
-    for cols in (10, 20, 40):
-        top, mid, bot = header_box("a" * 200, "12:00:00  ", cols, "X")
-        widths = {len(strip_ansi(top)), len(strip_ansi(mid)), len(strip_ansi(bot))}
-        assert len(widths) == 1, (cols, widths)
-        assert len(strip_ansi(mid)) == cols + MARGIN_H, (cols, len(strip_ansi(mid)))
     assert visual_len("plain") == 5
     assert visual_len(f"{Colors.BOLD}x{Colors.RESET}") == 1
     assert truncate_text("abcdefgh", 4) == "abc…"
     assert plural(1, "disc") == "1 disc" and plural(2, "disc") == "2 discs"
-    # Regression guard: wrap_margins must join with \r\n, not \n - under raw
-    # terminal mode (OPOST cleared) a bare \n never returns to column 1, and
-    # every line after the first starts wherever the previous one ended.
-    assert "\r\n" in wrap_margins(["a", "b"])
-    # wrap_margins(width=...) must clip an oversized line rather than let it
-    # overflow - the safety net behind every tool's own per-field sizing.
-    clipped = wrap_margins(["a" * 200], width=10).split("\r\n")[1]
-    assert len(strip_ansi(clipped)) <= 10 + MARGIN_H, clipped
     assert human_gb(1048576) == "1.0"
     hist = []
     assert rate_of_change(hist, 0.0, 0) is None            # first sample - no window yet

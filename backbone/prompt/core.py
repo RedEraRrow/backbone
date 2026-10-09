@@ -2499,7 +2499,7 @@ def run_dashboard(render, interval: float = 1.0, quit_action: str = "list.quit",
     `quit_action` binding (see backbone.keys) is pressed.
 
     `render()` takes no arguments and returns the whole frame as a list of
-    lines, each carrying its own left-margin indent (see header_box()). It
+    lines, each carrying its own left-margin indent (box_lines() adds it). It
     runs once every `interval` seconds; keypresses and resizes are checked
     every `poll` seconds regardless, and a resize renders at once.
 

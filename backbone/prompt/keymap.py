@@ -30,13 +30,17 @@ def _row(a: keys.Action) -> Choice:
                          "changed" if changed else ""])
 
 
-def _choices() -> list:
+def _choices(scopes) -> list:
+    """Every action this app has a use for, by its screen: only `scopes`
+    (all, when None), and no transport or volume keys without a player."""
+    from backbone.prompt.chrome import has_owner
     out: list = []
     for scope, title in keys.scopes():
-        if scope == "keys_editor":
-            continue                                 # listed last, below
-        out.append(separator(title))
-        out += [_row(a) for a in keys.actions(scope)]
+        if scope == "keys_editor" or (scopes is not None and scope not in scopes):
+            continue                                 # this page's own are listed last, below
+        rows = [_row(a) for a in keys.actions(scope) if has_owner(a.id)]
+        if rows:
+            out += [separator(title), *rows]
     out.append(separator("This page"))
     out += [_row(a) for a in keys.actions("keys_editor")]
     return out
@@ -102,8 +106,9 @@ def _remove_key(aid: str) -> None:
     ui.show_status(f"{keys.glyph(key)} removed" + ("" if len(bound) > 1 else ": the action has no key now"))
 
 
-def keys_editor() -> None:
-    """The Key bindings page. Returns when backed out of."""
+def keys_editor(scopes: list | None = None) -> None:
+    """The Key bindings page, for the key groups (keys.define scopes) in
+    `scopes`, or every one defined. Returns when backed out of."""
     from backbone.prompt.lists import ListPlace, select
     place = ListPlace()
     while True:
@@ -124,7 +129,7 @@ def keys_editor() -> None:
             hints[keys.label(aid)] = {"remove": "remove a key", "reset": "reset",
                                       "reset_all": "reset all"}[name]
 
-        choice = select("", _choices(), columns=_COLUMNS, place=place,
+        choice = select("", _choices(scopes), columns=_COLUMNS, place=place,
                         header=lambda: rounded_header("Key bindings", "",
                                                       f"{changed} changed" if changed else "all default"),
                         extra_hints={"↵": "add a key"},

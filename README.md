@@ -32,9 +32,9 @@ how to install anything it can't run without.
 ## What's in it
 
 **`ui`** - the visual layer. `Colors` (honours `NO_COLOR=1`), the global
-`MARGIN_H` / `MARGIN_V` inset every frame is drawn inside, `wrap_margins`,
-`rule`, `bar`, `header_box`, `sparkline`, `spinner`, `rate_of_change`, and
-the `SPIN` / `PARTS` / `SPARK` glyph sets. Also the ANSI-aware text
+`MARGIN_H` / `MARGIN_V` inset every frame is drawn inside, the progress
+bar (`progress_cells`, `get_progress_bar`), `sparkline`, `spinner`,
+`rate_of_change`, and the `SPIN` / `SPARK` glyph sets. Also the ANSI-aware text
 measuring (`visual_len`, `truncate_text`, `clip_ansi`, `strip_ansi`) that
 makes any of that survive colour codes and wide characters, and small
 formatters: `plural`, `human_gb`, `dir_size_kb`. The accent colour is chosen
@@ -42,16 +42,9 @@ with `set_accent` (an `ACCENT_PRESETS` key or `#RRGGBB`); a tool calls it once
 at startup from its own settings, and `accent_code` / `accent_label` let a
 settings screen check and name a value.
 
-**`prompt.settings`** - what a Settings screen is built from, so every
-tool's reads the same: `SETTINGS_COLUMNS` (a name, then its state),
-`state_glyph` (● / ○), `space_toggles` (space flips the on/off rows),
-`index_of` (the cursor back on the row just changed), `pick_option` (one of
-a fixed set of values) and `pick_accent` (the accent colour picker, each
-colour shown in itself).
-
 `from backbone import ...` exposes only a subset of `ui` (`Colors`, the
-margins and glyph sets, `spinner`, `content_width`, `rule`, `bar`,
-`header_box`, `wrap_margins`); import anything else from its module, e.g.
+margins and glyph sets, `spinner`, `content_width`); import anything else
+from its module, e.g.
 `from backbone.ui import human_gb`.
 
 **`prompt`** - the widgets. `select` (single or multi), `confirm`, `text`,
@@ -60,6 +53,13 @@ values: `calendar_select`, `datetime_edit`, `time_edit`,
 `fraction_edit`, `number_edit`, `rating_edit`, `equaliser_edit`, `rva2_edit`,
 `system_editor_edit`. All resize-aware, all mouse-aware, all rendered through
 the same painter.
+
+**`prompt.settings`** - what a Settings screen is built from, so every
+tool's reads the same: `SETTINGS_COLUMNS` (a name, then its state),
+`state_glyph` (● / ○), `space_toggles` (space flips the on/off rows),
+`index_of` (the cursor back on the row just changed), `pick_option` (one of
+a fixed set of values) and `pick_accent` (the accent colour picker, each
+colour shown in itself).
 
 **`prompt.core`** - the primitives underneath: the screen-diff painter, key
 reading, the `Choice` and `Column` types, the footer hint bar (`hint`) and its

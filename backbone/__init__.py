@@ -4,14 +4,9 @@ from .ui import (
     MARGIN_H,
     MARGIN_V,
     SPIN,
-    PARTS,
     SPARK,
     spinner,
     content_width,
-    rule,
-    bar,
-    header_box,
-    wrap_margins,
 )
 
 __all__ = [
@@ -19,12 +14,7 @@ __all__ = [
     "MARGIN_H",
     "MARGIN_V",
     "SPIN",
-    "PARTS",
     "SPARK",
     "spinner",
     "content_width",
-    "rule",
-    "bar",
-    "header_box",
-    "wrap_margins",
 ]

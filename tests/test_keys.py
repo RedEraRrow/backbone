@@ -105,5 +105,34 @@ class VolumeKeysTest(unittest.TestCase):
         self.assertEqual(got, ["vol_up", "vol_down"])
 
 
+class KeyBindingsPageTest(unittest.TestCase):
+    """The Key bindings page lists what the app has a use for: the screens it
+    names, and the transport and volume keys only with a player."""
+
+    def rows(self, scopes=None, handler=None, opener=None):
+        from backbone.prompt import chrome, keymap
+        with patch.object(chrome, "_transport_handler", handler), patch.object(chrome, "_player_opener", opener):
+            return [c.value or c.title for c in keymap._choices(scopes)]
+
+    def test_no_player_no_transport_keys(self):
+        rows = self.rows()
+        self.assertNotIn("global.playpause", rows)
+        self.assertNotIn("global.player", rows)
+        self.assertNotIn("Volume", rows)                  # its group goes with its keys
+        self.assertIn("global.help", rows)
+
+    def test_with_a_player_they_are_there(self):
+        rows = self.rows(handler=print, opener=print)
+        self.assertIn("global.playpause", rows)
+        self.assertIn("global.player", rows)
+        self.assertIn("volume.up", rows)
+
+    def test_only_the_named_groups(self):
+        rows = self.rows(["list"])
+        self.assertIn("list.up", rows)
+        self.assertNotIn("confirm.yes", rows)
+        self.assertEqual(rows[-4:], ["This page", "keys_editor.remove", "keys_editor.reset", "keys_editor.reset_all"])
+
+
 if __name__ == "__main__":
     unittest.main()
