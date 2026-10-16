@@ -602,17 +602,25 @@ def _screen_cleared() -> None:
             _screen_invalidator()
 
 
+MOUSE_ON = "\033[?1000h\033[?1006h"     # click and wheel reporting, SGR-encoded
+MOUSE_OFF = "\033[?1000l\033[?1006l"
+
+
 def enter_alt_screen() -> None:
     """Switch to the terminal alternate screen buffer (no scrollback).
 
     Also enables focus in/out reporting (\\033[?1004h) so editors can show a
     hollow cursor when the window loses focus; unsupported terminals ignore it.
+    And mouse reporting (clicks and the wheel), for as long as the app's
+    screen is up: one switch for the whole terminal, so it's this screen's,
+    not each widget's (a widget turning it off on its way out left the
+    screen it went back to deaf to the mouse).
     And turns auto-wrap off (\\033[?7l): every row is placed explicitly, so a
     row too wide for the window should be cut at the edge, not run onto the
     next, which is what a write still sized for the old width does in the
     moment between a resize and the redraw that answers it.
     """
-    sys.stdout.write("\033[?1049h\033[?1004h\033[?7l\033[H\033[3J\033[J" + Colors.HIDE)
+    sys.stdout.write("\033[?1049h\033[?1004h\033[?7l\033[H\033[3J\033[J" + MOUSE_ON + Colors.HIDE)
     sys.stdout.flush()
     _screen_cleared()
     _in_app[0] = True
@@ -620,9 +628,9 @@ def enter_alt_screen() -> None:
 
 
 def exit_alt_screen() -> None:
-    """Restore the main screen buffer, auto-wrap and focus reporting, and show
-    the cursor."""
-    sys.stdout.write("\033[?25h\033[?7h\033[?1004l\033[?1049l")
+    """Restore the main screen buffer, auto-wrap and focus reporting, turn
+    mouse reporting off, and show the cursor."""
+    sys.stdout.write(MOUSE_OFF + "\033[?25h\033[?7h\033[?1004l\033[?1049l")
     sys.stdout.flush()
     if _screen_invalidator is not None:          # the app's screen is gone: the painter forgets it
         with quietly():

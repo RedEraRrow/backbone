@@ -1028,11 +1028,12 @@ def system_editor_edit(initial_text: str) -> str | None:
         temp_path = tf.name
     try:
         editor = _find_editor() or 'nano'
-        sys.stdout.write("\033[?7h"); sys.stdout.flush()     # the editor expects wrapping on
+        # The editor expects wrapping on and no mouse reports in its input.
+        sys.stdout.write("\033[?7h" + ui.MOUSE_OFF); sys.stdout.flush()
         try:
             subprocess.run(editor.split() + [temp_path], check=True)
         finally:
-            sys.stdout.write("\033[?7l")                     # ours again (see enter_alt_screen)
+            sys.stdout.write("\033[?7l" + ui.MOUSE_ON)       # ours again (see enter_alt_screen)
         # The editor owned the screen and left its own cursor visible: forget what
         # we thought was on screen and hide the cursor again before the caller
         # repaints, so no caret is left blinking over our frame.

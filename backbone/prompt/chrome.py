@@ -290,16 +290,19 @@ def consume_chrome(key: str, cells: dict, free_keys: bool = False):
 
 
 def enable_mouse() -> None:
-    """Turn on click + scroll reporting for a widget that wants clickable hints."""
+    """Make sure click + scroll reporting is on, for a widget that wants
+    clickable hints (on the app's screen it already is: ui.enter_alt_screen)."""
     if not _IS_WINDOWS:
-        sys.stdout.write("\033[?1000h\033[?1006h")
+        sys.stdout.write(ui.MOUSE_ON)
         sys.stdout.flush()
 
 
 def disable_mouse() -> None:
-    """Turn click reporting back off on the way out."""
-    if not _IS_WINDOWS:
-        sys.stdout.write("\033[?1000l\033[?1006l")
+    """Turn click reporting back off on the way out of a widget run on its
+    own. On the app's screen it stays on: it's the screen's switch, and the
+    screen under this widget still wants it (ui.exit_alt_screen turns it off)."""
+    if not _IS_WINDOWS and not ui.on_app_screen():
+        sys.stdout.write(ui.MOUSE_OFF)
         sys.stdout.flush()
 
 
