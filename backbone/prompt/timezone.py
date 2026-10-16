@@ -1222,12 +1222,12 @@ def _render_world_map(selected_offset_h: int, selected_offset_m: int,
     eq_row = _lat_to_crow(0.0)
     pm_col = _lon_to_ccol(0.0)
 
-    LAND_FG    = "\033[38;2;80;160;80m"
-    HL_LAND    = "\033[38;2;160;255;160m"
-    RESET      = "\033[0m"
-    DOT_FG     = "\033[38;2;200;190;80m"   # same-offset capital: bright yellow
-    DOT_CUR_FG = "\033[1;97m"             # selected city: bright white bold
-    DIM_FG     = "\033[38;2;45;75;45m"
+    LAND_FG    = C.MUTED                    # land
+    HL_LAND    = C.ACCENT                   # land in the picked zone
+    RESET      = C.RESET
+    DOT_FG     = C.ACCENT2                  # a capital with the picked offset
+    DOT_CUR_FG = C.STRONG                   # the picked city
+    DIM_FG     = C.DIM                      # the equator and prime meridian
 
     lines = []
     for char_row in range(map_rows):
@@ -1370,7 +1370,7 @@ def timezone_select(initial_offset: str = "") -> str | None:
         for i in range(lo, hi + 1):
             label = _offset_display(*unique_offsets[i])
             if i == off_idx:
-                strip_parts.append(f"{C.BOLD}{C.PRIMARY}{label}{C.RESET}")
+                strip_parts.append(f"{C.BOLD}{C.STRONG}{label}{C.RESET}")
             else:
                 strip_parts.append(f"{C.DIM}{label}{C.RESET}")
         if hi < len(unique_offsets) - 1:
@@ -1440,9 +1440,7 @@ def timezone_select(initial_offset: str = "") -> str | None:
 
         while True:
             if ui.consume_resize():
-                sys.stdout.write("\033[H\033[3J\033[J")
-                sys.stdout.flush()
-                w.anchor_reset()
+                w.anchor_reset()            # its next frame clears, through the painter
                 _render()
                 continue
 

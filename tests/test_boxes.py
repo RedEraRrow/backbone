@@ -249,7 +249,7 @@ class ColumnBrowserTest(unittest.TestCase):
         self.assertEqual(len(set(shapes)), 1)                              # the widest row's, for all
 
     def test_the_levels_share_a_box_the_preview_has_two(self):
-        _res, frame, seen = self._frame(200, ['DOWN', 'ESC'])
+        _res, frame, _seen = self._frame(200, ['DOWN', 'ESC'])
         top = next(line for line in frame if "╭" in line)
         self.assertEqual(top.count("╭"), 2)                                 # the browser's box, the details'
         self.assertTrue(any("Holds" in line and "╭" in line for line in frame[1:]))   # the contents' box
@@ -257,7 +257,7 @@ class ColumnBrowserTest(unittest.TestCase):
         self.assertLess(col("Albums"), col("Album 4"))
         self.assertLess(col("Album 4"), col("Row 3"))
         self.assertLess(top.index("╮"), col("P2"))
-        self.assertEqual(seen[-1], 2)
+        self.assertFalse(any("P3" in line for line in frame))            # only the highlighted row's (its neighbours are made ready unseen)
         self.assertTrue(all(ui.visual_len(line) <= 200 for line in frame))
 
     def test_narrow_puts_the_details_in_a_strip_under_the_list(self):
@@ -334,17 +334,68 @@ class CellPaintTest(unittest.TestCase):
         self.assertEqual(out, "")                                     # only reserved cells differ: nothing
         self.assertEqual("".join(ch for _st, ch in core._cells[9][4:8]), "LYRC")
 
-    def test_an_overlay_is_put_back_as_it_was(self):
+    def test_a_layer_is_put_back_as_the_screen_is_now(self):
         core.screen_invalidate()
         core.screen_row_paint(9, f"ab{ui.Colors.DIM}cdef{ui.Colors.RESET}gh")
-        before = list(core._cells[9])
-        saved = core.screen_save(9, 9, 3, 6)
-        core.screen_span_paint(9, 3, "XXXX")                          # the overlay
+        out = io.StringIO()
+        with patch.object(sys, 'stdout', out):
+            layer = core.screen_layer(["XXXX"], 9, 3)                 # the overlay
+        painted = core.screen_row_paint(9, f"ab{ui.Colors.DIM}cdeF{ui.Colors.RESET}gH")   # the screen goes on under it
+        self.assertNotIn("F", ui.strip_ansi(painted))                 # nothing under the box written
+        self.assertIn("H", ui.strip_ansi(painted))
         core._shown_pictures[:] = [(9, 4, 1, "k", "PIC", 2)]          # an image under it
-        out = core.screen_restore(saved)
-        self.assertEqual(core._cells[9], before)                      # every cell, style and all
-        self.assertIn("PIC", out)                                     # and the image drawn again
+        out = io.StringIO()
+        with patch.object(sys, 'stdout', out):
+            core.screen_layer_close(layer)
+        shown = out.getvalue()
+        self.assertIn(ui.Colors.DIM + "cdeF", shown)                  # what's there now, style and all
+        self.assertIn("PIC", shown)                                   # and the image drawn again
+        self.assertNotIn("\033[2J", shown)                           # never a clear
+        self.assertFalse(core._layers)
         core._shown_pictures.clear()
+
+    def test_a_picture_another_screen_draws_is_sent_again_by_it(self):
+        core.screen_invalidate()
+        core.screen_row_paint(5, "x" * 30)
+        sent = []
+        core.screen_picture_area('art', (4, 2, 4, 10), lambda: sent.append(True))
+        with patch.object(sys, 'stdout', io.StringIO()):
+            layer = core.screen_layer(["[ box ]"], 5, 20)              # clear of the picture
+            core.screen_layer_close(layer)
+            self.assertEqual(sent, [])
+            layer = core.screen_layer(["[ box ]"], 5, 8)               # over it
+            core.screen_layer_close(layer)
+        self.assertEqual(sent, [True])
+        core.screen_picture_area('art', None)
+
+    def test_a_clear_puts_an_open_layer_straight_back(self):
+        core.screen_invalidate()
+        out = io.StringIO()
+        with patch.object(sys, 'stdout', out):
+            layer = core.screen_layer(["[ box ]"], 3, 3)
+            ui.clear_screen()
+        self.assertTrue(out.getvalue().rstrip("\0338").endswith("[ box ]" + ui.Colors.RESET))
+        self.assertIn(layer, core._layers)
+        with patch.object(sys, 'stdout', io.StringIO()):
+            core.screen_layer_close(layer)
+
+    def test_a_row_written_whole_keeps_the_layer_on_top(self):
+        core.screen_invalidate()
+        with patch.object(sys, 'stdout', io.StringIO()):
+            layer = core.screen_layer(["[ box ]"], 3, 3)
+        out = core.screen_row_paint(3, "\033]8;;x\033\\link\033]8;;\033\\")   # an escape it doesn't follow
+        self.assertTrue(out.endswith("\0338"))                                    # the box drawn again after
+        self.assertIn("[ box ]", out)
+        with patch.object(sys, 'stdout', io.StringIO()):
+            core.screen_layer_close(layer)
+
+    def test_row_keys_carry_one_mark(self):
+        core.screen_invalidate()
+        core.screen_row_paint(9, "abcdef")
+        for _ in range(5):
+            core.screen_span_paint(9, 2, "X")
+            core.screen_forget_cells(9, 9, 1, 2)
+        self.assertEqual(core._screen[9].count("\x00span") + core._screen[9].count("\x00forgotten"), 1)
 
     def test_a_span_writes_only_what_changed(self):
         core.screen_invalidate()
@@ -384,27 +435,28 @@ class FloatTest(unittest.TestCase):
         self.size.start()
 
     def tearDown(self):
-        core._float.clear()
+        with patch.object(sys, 'stdout', io.StringIO()):
+            core.screen_float_close()
         self.size.stop()
         core.screen_invalidate()
 
     def test_progress_in_the_app_floats_and_goes_when_cleared(self):
         core.screen_row_paint(5, "x" * 40)
         out = io.StringIO()
-        with patch.object(ui, '_on_app_screen', lambda: True), patch.object(sys, 'stdout', out):
+        with patch.object(ui, 'on_app_screen', lambda: True), patch.object(sys, 'stdout', out):
             ui.print_inline_progress("Measuring 1/3: one.mp3", 0.0)
-            first = dict(core._float)
+            first = dict(core._floating[0])
             ui.print_inline_progress("Measuring 2/3: a much longer name.mp3", 0.5)
-            self.assertEqual((core._float['top'], core._float['w']), (first['top'], first['w']))   # holds still
+            self.assertEqual((core._floating[0]['top'], core._floating[0]['w']), (first['top'], first['w']))   # holds still
             self.assertNotIn("\r", out.getvalue())                      # no line wherever the cursor was
             ui.clear_inline_progress()
-        self.assertFalse(core._float)
+        self.assertIsNone(core._floating[0])
         self.assertIn("x" * 10, ui.strip_ansi(out.getvalue()))           # what it covered, back
         out = io.StringIO()
-        with patch.object(ui, '_on_app_screen', lambda: False), patch.object(sys, 'stdout', out):
+        with patch.object(ui, 'on_app_screen', lambda: False), patch.object(sys, 'stdout', out):
             ui.print_inline_progress("Measuring", 0.5)                   # the command line: the inline bar
         self.assertTrue(out.getvalue().startswith("\r"))
-        self.assertFalse(core._float)
+        self.assertIsNone(core._floating[0])
 
     def test_a_pulse_takes_it_away_on_time_too(self):
         """With music playing, state-change pulses come faster than the idle
@@ -413,7 +465,7 @@ class FloatTest(unittest.TestCase):
         out = io.StringIO()
         with patch.object(sys, 'stdout', out):
             core.screen_float(["[ VOL ]"], 60)
-        core._float['until'] = 0                                            # its time is up
+        core._floating[0]['until'] = 0                                            # its time is up
         r, w = _os.pipe()
         _os.write(w, b"x")
         try:
@@ -423,7 +475,7 @@ class FloatTest(unittest.TestCase):
                 core._wait_for_keypress(0)
         finally:
             _os.close(r); _os.close(w)
-        self.assertFalse(core._float)                                       # gone, though no idle tick was due
+        self.assertIsNone(core._floating[0])                                       # gone, though no idle tick was due
 
     def test_rows_painted_under_it_leave_it_be_and_come_back_after(self):
         row = "x" * 40
@@ -431,13 +483,13 @@ class FloatTest(unittest.TestCase):
         out = io.StringIO()
         with patch.object(sys, 'stdout', out):
             core.screen_float(["[ VOL ]"], 60)
-        top, left, w = core._float['top'], core._float['left'], core._float['w']
+        top, left, w = core._floating[0]['top'], core._floating[0]['left'], core._floating[0]['w']
         self.assertEqual(top, 5)
         painted = core.screen_row_paint(5, "y" * 40)                     # the screen goes on under it
         cols = [int(m) for m in re.findall(r'\x1b\[5;(\d+)H', painted)]
         self.assertTrue(cols and all(c < left or c >= left + w for c in cols))   # nothing under the box
         self.assertEqual(ui.strip_ansi(painted).count("y"), 40 - w)      # every cell but the box's
-        core._float['until'] = 0
+        core._floating[0]['until'] = 0
         out = io.StringIO()
         with patch.object(sys, 'stdout', out):
             self.assertTrue(core.float_tick())                          # its time up: gone
@@ -448,7 +500,8 @@ class FloatTest(unittest.TestCase):
         with patch.object(sys, 'stdout', io.StringIO()):
             core.screen_float(["one"], 60)
             core.screen_float(["two two"], 60)
-        self.assertEqual(core._float['lines'], ["two two"])
+        self.assertEqual(core._floating[0]['lines'], ["two two"])
+        self.assertEqual(len(core._layers), 1)
 
 
 
@@ -566,28 +619,6 @@ class CrampedTest(unittest.TestCase):
             self.assertEqual("Make the window bigger" in text, boxed, (cols, rows))
             self.assertEqual("╭" in text, boxed, (cols, rows))                # the words only ever in their box
 
-
-
-class OverlayCutTest(unittest.TestCase):
-    """An overlay never leaves half a box: where it would cut a box's border
-    it has the window to itself."""
-
-    def setUp(self):
-        core.screen_invalidate()
-        self.size = patch.object(ui, 'get_terminal_size', lambda *a: (40, 12))
-        self.size.start()
-        core.screen_row_paint(1, "")
-
-    def tearDown(self):
-        self.size.stop()
-        core.screen_invalidate()
-
-    def test_a_border_inside_the_rectangle_is_a_cut(self):
-        core.screen_row_paint(4, "  ╭──────────╮")
-        core.screen_row_paint(5, "  │ inside   │")
-        self.assertTrue(core.screen_crosses_box(3, 6, 1, 20))              # over the border
-        self.assertFalse(core.screen_crosses_box(5, 5, 5, 10))             # within the box's inside
-        self.assertFalse(core.screen_crosses_box(8, 9, 1, 20))             # clear of it
 
 
 class HelpToggleRoomTest(unittest.TestCase):

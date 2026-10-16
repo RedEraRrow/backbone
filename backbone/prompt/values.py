@@ -9,7 +9,8 @@ from backbone import keys, ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _with_toggle_hint, boxed_chrome, consume_chrome, disable_mouse, enable_mouse
-from backbone.prompt.core import C
+from backbone.prompt.core import C, edit_line
+from backbone.prompt.text import field_frame
 
 
 def _frac_result(buffers: dict, varies: set) -> dict:
@@ -24,82 +25,63 @@ def _frac_result(buffers: dict, varies: set) -> dict:
 
 def fraction_edit(message: str = "Edit metadata pair:",
                     tag: str = "TRCK", value: str = "",
-                    varies: object = ()) -> dict | None:
-    """
-    In-place editor for an isolated single tag's current/total values.
-    Accepts any text in either half.
+                    varies: object = (), note: str = "") -> dict | None:
+    """A number and its total (track 3 of 12, disc 1 of 2), as a typed field:
+    the pair in a box their own size, Tab or Shift-Tab between them, and
+    under it what guides: `note` (what's being set), what a blank field
+    keeps, and a number past its total. Either half takes any text (a vinyl
+    side's A1, a half-track's 3.5).
 
-    ``varies`` names the fields ('current' / 'total') that differ across a bulk
-    selection.  Those open blank, render as a dim ``──`` placeholder, and come
-    back as ``None`` if left untouched (meaning "keep each file's own value"),
-    so you can set the half the files share without flattening the half they
-    don't.  Typing into such a field turns it into a real value for everything.
+    ``varies`` names the halves ('current' / 'total') that differ across a
+    bulk selection. Those open blank, say so, and come back as ``None`` if
+    left blank (each file keeps its own), so the half the files share can be
+    set without flattening the half they don't. Typing into one makes it a
+    value for every file.
 
-    Returns:
-        Dict with keys: {'current', 'total'} (a value may be None when it
-        varies and was left alone), or None if cancelled
+    Returns {'current', 'total'} (either None as above), or None if cancelled.
     """
     varies = {str(v) for v in (varies or ())}
-    tag_config = {
-        "TRCK": ("Track", "of"),
-        "TPOS": ("Disc", "of"),
-        "MVIN": ("Movement", "of"),
-    }
-    lbl_idx, lbl_tot = tag_config.get(tag.upper(), ("Index", "of"))
-
-    # Extract baseline values from the value string (e.g., "3.5/12" -> current="3.5", total="12")
-    parts = str(value).split('/') if '/' in str(value) else str(value).split('⁄') if '⁄' in str(value) else [value, ""] if value else ["", ""]
-    curr_val = parts[0].strip()
-    tot_val = parts[1].strip() if len(parts) > 1 else ""
-    # A field that varies has no single value to show, so it starts empty and
-    # picks up the dim placeholder below.
-    if 'current' in varies:
-        curr_val = ""
-    if 'total' in varies:
-        tot_val = ""
-
-    field_order = ['current', 'total']
-    field_labels = {'current': lbl_idx, 'total': lbl_tot}
-
-    cursor_field = 0
-    edit_buffers = {
-        'current': list(curr_val),
-        'total': list(tot_val)
-    }
-    edit_positions = {k: len(edit_buffers[k]) for k in field_order}
+    label = {"TRCK": "Track", "TPOS": "Disc", "MVIN": "Movement"}.get(tag.upper(), "Number")
+    text = str(value)
+    cur, _sep, tot = text.partition('/') if '/' in text else text.partition('⁄')
+    buffers = {'current': [] if 'current' in varies else list(cur.strip()),
+               'total': [] if 'total' in varies else list(tot.strip())}
+    positions = {k: len(v) for k, v in buffers.items()}
+    order = ['current', 'total']
+    at = 0
 
     fd = sys.stdin.fileno()
     old = _get_term_attrs(fd)
     w = _Widget(fd)
     _hint_cells: dict = {}   # clickable hint keys, filled by append_chrome
 
+    def _shown(field: str) -> str:
+        """A half as drawn: the caret in the one being typed in, a dim
+        stand-in for a blank one."""
+        val = "".join(buffers[field])
+        if field == order[at]:
+            return block_cursor(val, positions[field])
+        if not val:
+            return f"{C.DIM}{ui.stand_in('varies' if field in varies else 'none')}{C.RESET}"
+        return val
+
+    def _guide() -> list:
+        """What's under the field: the note, what a blank varying half keeps,
+        and a number past its total (a slip, most likely; still taken)."""
+        lines = [f"  {C.DIM}{note}{C.RESET}"] if note else []
+        for field, name in (('current', label.lower()), ('total', 'total')):
+            if field in varies and not buffers[field]:
+                lines.append(f"  {C.DIM}Left blank, each file keeps its own {name}.{C.RESET}")
+        c, t = "".join(buffers['current']), "".join(buffers['total'])
+        if c.isdigit() and t.isdigit() and int(t) and int(c) > int(t):
+            lines.append(f"  {C.WARN}{label} {c} is past the total, {t}.{C.RESET}")
+        return lines
+
     def _render():
-        lines = []
-
-        row = "  "
-        for i, field in enumerate(field_order):
-            if i > 0:
-                row += " "
-
-            label = field_labels[field]
-            val_str = "".join(edit_buffers[field])
-
-            if i == cursor_field:
-                row += f"{label} {block_cursor(val_str, edit_positions[field])}"
-            else:
-                if not val_str:
-                    row += f"{C.DIM}{label} ──{C.RESET}"
-                else:
-                    row += f"{label} {val_str}"
-            if field in varies and not val_str:
-                row += f" {C.DIM}(varies){C.RESET}"
-
-        lines.append(row)
-
+        field = [f"  {C.DIM}{label}{C.RESET} {_shown('current')}   {C.DIM}of{C.RESET} {_shown('total')}"]
         # No q: these fields take text, so q is a letter here.
-        lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(
-            [("↵", "save"), ("tab/⇧tab", "field"), ("esc", "back")]), _hint_cells)
-        w.render(lines)
+        pairs = _with_toggle_hint([("tab/⇧tab", "field"), ("↵", "save"), ("esc", "back")])
+        w.render(field_frame(message, field, _guide(), pairs, _hint_cells))
 
     result = None
     try:
@@ -130,33 +112,17 @@ def fraction_edit(message: str = "Edit metadata pair:",
                 key = _ch
             if chrome.is_mode_toggle(key):
                 return MODE_TOGGLE  # type: ignore[return-value]
-            current_field = field_order[cursor_field]
-            buf = edit_buffers[current_field]
-            pos = edit_positions[current_field]
-
+            field = order[at]
             if key == 'ENTER':
-                result = _frac_result(edit_buffers, varies)
+                result = _frac_result(buffers, varies)
                 break
             elif key in ('ESC', 'CTRL_C'):      # Ctrl-C cancels, as in every widget
                 break
             elif key in ('TAB', 'BACKTAB'):
                 # Shift+Tab is Tab in reverse, on every screen that has fields.
-                _step = -1 if key == 'BACKTAB' else 1
-                cursor_field = (cursor_field + _step) % len(field_order)
-            elif key == 'BACKSPACE':
-                if pos > 0:
-                    buf.pop(pos - 1)
-                    edit_positions[current_field] = pos - 1
-            elif key == 'DELETE':
-                if pos < len(buf):
-                    buf.pop(pos)
-            elif key == 'LEFT':
-                edit_positions[current_field] = max(0, pos - 1)
-            elif key == 'RIGHT':
-                edit_positions[current_field] = min(len(buf), pos + 1)
-            elif key == 'SPACE' or (len(key) == 1 and (key.isalnum() or key in ".-")):
-                buf.insert(pos, ' ' if key == 'SPACE' else key)
-                edit_positions[current_field] = pos + 1
+                at = (at + (-1 if key == 'BACKTAB' else 1)) % len(order)
+            elif (new_pos := edit_line(buffers[field], positions[field], key)) is not None:
+                positions[field] = new_pos
 
             _render()
 
@@ -370,7 +336,7 @@ def number_edit(message: str = "Edit number:", *, value: int = 0,
         unit_s = f" {unit}" if unit else ""
         bounds = f"min {minimum}" + ("" if maximum is None else f", max {maximum}")
         lines = [
-            f"  {C.ACCENT}▸{C.RESET} {C.BOLD}{shown}{C.RESET}{C.DIM}{unit_s}{C.RESET}   {C.DIM}({bounds}){C.RESET}",
+            f"  {C.ACCENT}›{C.RESET} {C.BOLD}{shown}{C.RESET}{C.DIM}{unit_s}{C.RESET}   {C.DIM}({bounds}){C.RESET}",
         ]
         lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(
             [("↑↓", "±1"), ("⇞⇟", "±10"),
@@ -463,7 +429,7 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
     def _render():
         filled = f"{C.ACCENT}{'★' * stars}{C.RESET}"
         empty = f"{C.DIM}{'☆' * (5 - stars)}{C.RESET}"
-        rlabel = "unrated" if stars == 0 else f"{stars}/5"
+        rlabel = ui.stand_in("unrated") if stars == 0 else f"{stars}/5"
         # Plays and Rater take typing but drew nothing to type against: the
         # block shows which field has the keyboard and where the next character
         # lands. Both append at the end, so the block rides there.
@@ -475,10 +441,10 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
         elif email:
             rater = email
         else:
-            rater = f"{C.DIM}(default){C.RESET}"
+            rater = f"{C.DIM}{ui.stand_in('default')}{C.RESET}"
 
         def _mark(i: int) -> str:
-            return f"{C.ACCENT}▸{C.RESET}" if field == i else " "
+            return f"{C.ACCENT}›{C.RESET}" if field == i else " "
 
         def _lab(i: int, text: str) -> str:
             return f"{C.BOLD}{text}{C.RESET}" if field == i else f"{C.DIM}{text}{C.RESET}"

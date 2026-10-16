@@ -37,10 +37,27 @@ bar (`progress_cells`, `get_progress_bar`), `sparkline`, `spinner`,
 `rate_of_change`, and the `SPIN` / `SPARK` glyph sets. Also the ANSI-aware text
 measuring (`visual_len`, `truncate_text`, `clip_ansi`, `strip_ansi`) that
 makes any of that survive colour codes and wide characters, and small
-formatters: `plural`, `human_gb`, `dir_size_kb`. The accent colour is chosen
-with `set_accent` (an `ACCENT_PRESETS` key or `#RRGGBB`); a tool calls it once
-at startup from its own settings, and `accent_code` / `accent_label` let a
-settings screen check and name a value.
+formatters: `plural`, `human_gb`, `dir_size_kb`.
+
+Colours come from a theme. `Colors` has a role for each thing a screen marks
+(`ACCENT`, `ACCENT2`, `STRONG`, `OK`, `WARN`, `ERROR`, `INFO`, `NOTE`,
+`MUTED`, and the highlight bars `BAR` / `BAR_DIM`), never a hue: a screen
+asks for `C.ERROR`, not red. A tool calls `set_theme(name)` once at startup
+from its own settings, with a `THEMES` key. Terminal, the default, is the
+terminal's own sixteen colours, so it follows the terminal's theme, with two
+accents chosen from them (`set_terminal_accents`, `TERMINAL_ACCENTS`, and
+`prompt.pick_terminal_accent` to pick one); it asks
+the terminal whether its background is light or dark (`background_is_light`)
+for its highlight bars. The rest are whole-app themes in fixed colours, with
+their own text and background: while the app's screen is up
+(`enter_alt_screen`, or a `run_dashboard` view) those are the terminal's own
+default colours, so every blank, reset and clear is the theme's too, and the
+terminal's are put back when the screen goes or the process exits. A
+terminal that won't take them (checked once, by reading the background back:
+`full_themes_supported`) keeps its own background under the theme's colours.
+`theme_is_light` says which kind of background a theme is drawn for;
+`set_theme(name, overrides)` lays a host's own colours over a theme, as
+backtrack does with album art.
 
 `from backbone import ...` exposes only a subset of `ui` (`Colors`, the
 margins and glyph sets, `spinner`, `content_width`); import anything else
@@ -58,14 +75,14 @@ the same painter.
 tool's reads the same: `SETTINGS_COLUMNS` (a name, then its state),
 `state_glyph` (● / ○), `space_toggles` (space flips the on/off rows),
 `index_of` (the cursor back on the row just changed), `pick_option` (one of
-a fixed set of values) and `pick_accent` (the accent colour picker, each
-colour shown in itself).
+a fixed set of values) and `pick_theme` (the theme picker, each theme shown
+in its own colours).
 
 **`prompt.core`** - the primitives underneath: the screen-diff painter, key
 reading, the `Choice` and `Column` types, the footer hint bar (`hint`) and its
 click mapping, and `run_dashboard`.
 
-**`nav`** - `NAV_STACK`, the app-wide breadcrumb, and `QuitToTerminal`, which
+**`nav`** - tabs (`run_tabs`) and `QuitToTerminal`, which
 derives from `BaseException` specifically so an editor's `except Exception`
 can't swallow a quit.
 

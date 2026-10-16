@@ -116,7 +116,7 @@ def calendar_select(message: str = "Select date:", initial: str = "") -> str | N
                 else:
                     is_selected = (day == cursor_day)
                     if is_selected:
-                        style = f"{C.ACCENT}{C.BOLD}" if day_mode else f"{C.BOLD}"
+                        style = f"{C.BOLD}{C.ACCENT}" if day_mode else f"{C.BOLD}"
                         week_parts.append(f"{style}{day:2d}{C.RESET} ")
                     else:
                         week_parts.append(f"{day:2d} ")
@@ -341,7 +341,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                 if day == 0:
                     parts.append("   ")
                 elif day == cursor_day and section == 'date':
-                    style = f"{C.ACCENT}{C.BOLD}" if day_mode else C.BOLD
+                    style = f"{C.BOLD}{C.ACCENT}" if day_mode else C.BOLD
                     parts.append(f"{style}{day:2d}{C.RESET} ")
                 else:
                     parts.append(f"{day:2d} ")

@@ -1,8 +1,6 @@
-"""nav.py - app-wide navigation breadcrumb and the quit-to-terminal signal,
-shared by every back* tool that uses backbone's prompt widgets.
+"""nav.py - tabs and the quit-to-terminal signal, shared by every back* tool
+that uses backbone's prompt widgets.
 """
-NAV_STACK = ["Home"]
-
 
 class QuitToTerminal(BaseException):
     """Raised to unwind the entire menu stack and exit straight to the
@@ -29,8 +27,6 @@ from contextlib import contextmanager as _contextmanager
 TABS: list = []                 # (name, run) pairs while an app runs as tabs
 _active = [0]                   # the tab on screen
 _turns: dict = {}               # tab index → Event set while it's that tab's turn
-_visits: list = []              # tabs most recently shown last, for going back
-_stacks: dict = {}              # each tab's breadcrumb, kept while another shows
 _ended: _queue.Queue = _queue.Queue()
 _mine = _threading.local()      # .tab: the tab this thread runs
 _modal = [0]                    # screens inside nav.modal(): no switching
@@ -61,10 +57,10 @@ def run_tabs(tabs: list, home: int = 0) -> None:
     """Run an app as tabs, `tabs` being (name, run) pairs, starting on `home`,
     until a tab raises (QuitToTerminal to quit, or a crash), which is raised here.
 
-    A tab whose run() returns (backed out of its top level) goes back to the tab
-    shown before it, or, with none, `home` starts again."""
+    A tab whose run() returns (backed out of its top level) starts again there,
+    on screen: back (←, b, Esc) only ever goes back within a tab, each tab its
+    own, and never changes tabs."""
     _base_tty[0] = _tty()
-    crumb = NAV_STACK[:]
     TABS[:] = tabs
     try:
         _show(home)
@@ -74,31 +70,22 @@ def run_tabs(tabs: list, home: int = 0) -> None:
             except _queue.Empty:
                 continue
             _turns.pop(i, None)
-            _stacks.pop(i, None)
-            if i in _visits:
-                _visits.remove(i)
             if exc is not None:
                 raise exc
-            _show(_visits[-1] if _visits else home)
+            if _active[0] == i:
+                _show(i)
     finally:
         # Tabs still parked stay parked: their threads die with the app.
         TABS.clear()
-        _turns.clear(); _visits.clear(); _stacks.clear(); _fresh.clear()
+        _turns.clear(); _fresh.clear()
         _active[0] = 0
-        NAV_STACK[:] = crumb
         _set_tty(_base_tty[0])  # parked tabs never get to restore it themselves
 
 
 def _show(i: int) -> None:
     """Make tab `i` the one on screen and give it the turn, starting its thread
     on its first visit."""
-    if _active[0] in _turns:            # still running: keep its breadcrumb
-        _stacks[_active[0]] = NAV_STACK[:]
     _active[0] = i
-    NAV_STACK[:] = _stacks.get(i) or [TABS[i][0]]
-    if i in _visits:
-        _visits.remove(i)
-    _visits.append(i)
     if i not in _turns:
         _turns[i] = _threading.Event()
         _threading.Thread(target=_tab_thread, args=(i,), daemon=True,
@@ -116,7 +103,6 @@ def _tab_thread(i: int) -> None:
         try:
             TABS[i][1]()
         except _StartAfresh:
-            NAV_STACK[:] = [TABS[i][0]]
             continue
         except BaseException as e:      # handed to run_tabs, which raises it
             exc = e
@@ -166,8 +152,8 @@ def switch_to(j: int) -> None:
 
 
 def go_to_tab(name: str, fresh: bool = False) -> bool:
-    """Show the tab called `name` from another tab, returning (True) once that
-    one is left. False, doing nothing, outside tabs or already on it.
+    """Show the tab called `name` from another tab, returning (True) once this
+    one is shown again. False, doing nothing, outside tabs or already on it.
     `fresh`: that tab starts again from the top rather than where it was left
     (for a tab told where to open)."""
     names = [n for n, _run in TABS]

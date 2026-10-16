@@ -28,27 +28,24 @@ class SwitchingTest(unittest.TestCase):
             log.append("A1"); nav.switch_to(1); log.append("A2")
 
         def b(log):
-            log.append(("B1", nav.NAV_STACK[:])); nav.switch_to(0); log.append("B2")
-        self.assertEqual(_run(a, b), ["A1", ("B1", ["B"]), "A2"])
+            log.append("B1"); nav.switch_to(0); log.append("B2")
+        self.assertEqual(_run(a, b), ["A1", "B1", "A2"])
 
-    def test_backing_out_goes_to_the_tab_before(self):
+    def test_backing_out_stays_on_its_tab(self):
+        """Back (a tab's run() returning) never changes tabs: the tab starts
+        again where it is, and only a tab key moves away."""
+        runs = []
+
         def a(log):
-            log.append("A"); nav.switch_to(2); log.append("A again")
+            log.append("A"); nav.switch_to(1); log.append("A again")
 
         def b(log):
-            log.append("B")                                          # backs out at once
-
-        def c(log):
-            log.append("C"); nav.switch_to(1); log.append("C again")
-        self.assertEqual(_run(a, b, c), ["A", "C", "B", "C again", "A again"])
-
-    def test_a_tab_that_ended_starts_afresh(self):
-        def a(log):
-            nav.switch_to(1); nav.switch_to(1); log.append("A")
-
-        def b(log):
-            log.append("B")
-        self.assertEqual(_run(a, b), ["B", "B", "A"])
+            runs.append(1)
+            log.append(("B", len(runs), nav.active_tab()))
+            if len(runs) == 1:
+                return                                               # backed out at its top
+            nav.switch_to(0)                                         # a tab key
+        self.assertEqual(_run(a, b), ["A", ("B", 1, 1), ("B", 2, 1), "A again"])
 
     def test_backing_out_of_the_only_tab_starts_it_again(self):
         runs = []

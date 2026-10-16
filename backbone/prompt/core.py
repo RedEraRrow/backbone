@@ -1,11 +1,13 @@
 """Terminal primitives shared across prompt widgets."""
 from __future__ import annotations
+import functools
 import re
 import sys
 import os
 import math
 import textwrap
 import time
+from itertools import repeat
 import select as _sel
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -111,7 +113,7 @@ def screen_invalidate() -> None:
     _reserved.clear()                    # a frame after this reserves afresh
     _shown_pictures.clear()              # a clear took them with it
     _picture_areas.clear()
-    _float.clear()
+    _layers_wiped()
     _screen.clear()
     _cells.clear()
 
@@ -141,8 +143,8 @@ def _resize_wipe() -> str:
     _screen.clear()
     _cells.clear()
     _shown_pictures.clear()
-    _float.clear()                       # the wipe takes a floating box with it; it isn't drawn back at the old place
-    return "\033[H\033[2J" if was is not None else ""
+    _layers_wiped()                      # the wipe takes a floating box with it; an overlay's goes back on at once
+    return "\033[H\033[2J" + _layers_esc() if was is not None else ""
 
 
 def _row_width(text: str) -> int:
@@ -150,9 +152,18 @@ def _row_width(text: str) -> int:
     return ui.visual_len(ui.strip_ansi(text))
 
 
+def screen_cleared() -> None:
+    """The screen was just wiped: the model forgotten, and any overlay's
+    layer put straight back on, so a box never goes for a clear under it."""
+    screen_invalidate()
+    if _layers:
+        sys.stdout.write(_layers_esc())
+        sys.stdout.flush()
+
+
 def _register_screen_hooks() -> None:
     """Let `ui.clear_screen()` (and the alt-screen switch) drop the model."""
-    ui.set_screen_invalidator(screen_invalidate)
+    ui.set_screen_invalidator(screen_cleared)
 
 
 _takeover_pending = [False]
@@ -250,11 +261,12 @@ def screen_row_paint(row: int, text: str, extra: str = "") -> str:
         # this doesn't follow): written whole, as it always was.
         _cells.pop(row, None) if new is None else _cells.__setitem__(row, new)
         _painted[row] = [(1, 10 ** 6)]
-        if notch and new is not None and not _float_cols(row):   # drawn from its cells: the notch is in them
+        if notch and new is not None and not _layer_cols(row):   # drawn from its cells: the notch is in them
             return f"{wipe}\033[{row};1H\033[2K" + _cells_diff(row, [], new)[0]
-        if new is not None and _float_cols(row):      # a floating box over it: every cell but its
+        if new is not None and _layer_cols(row):      # a layer over it: every cell but its
             return wipe + _cells_diff(row, [_UNKNOWN] * max(len(new), ui.get_terminal_width()), new)[0]
-        return f"{wipe}\033[{row};1H\033[2K{text}{extra}"
+        # Written whole: a layer over it is drawn again on top.
+        return f"{wipe}\033[{row};1H\033[2K{text}{extra}" + (_layers_esc() if _layer_cols(row) else "")
     _cells[row] = new
     out, _painted[row] = _cells_diff(row, old, new)
     return out
@@ -268,8 +280,8 @@ def _notched(cells: list, notch: tuple) -> list:
     where a box's top border lies under the tab, an opening cut in it (the
     tab's sides turning into the border, or carrying on as the box's own
     side at its corner), and that box's title moved to the right end of its
-    border, clear of the tab (dropped when there's no room: the breadcrumb
-    says it too). Over blank cells, the tab is closed underneath."""
+    border, clear of the tab (dropped when there's no room: the tab's own
+    label names it). Over blank cells, the tab is closed underneath."""
     a, b = notch
     cells = list(cells) + [_BLANK] * max(0, b + 1 - len(cells))
     left = next((i for i in range(min(a, len(cells) - 1), -1, -1) if cells[i][1] == "╭"), None)
@@ -294,7 +306,7 @@ def _notched(cells: list, notch: tuple) -> list:
                 cells[i] = _BLANK
             return cells
     if all(c[1] == " " for c in cells[a:b + 1]):
-        cells[a], cells[b] = (C.DIM, "╰"), (C.DIM, "╯")
+        cells[a], cells[b] = (C.FRAME, "╰"), (C.FRAME, "╯")
         for i in range(a + 1, b):
             cells[i] = (C.DIM, "─")
     return cells
@@ -351,7 +363,7 @@ def screen_span_paint(row: int, col: int, text: str) -> str:
     span = _row_cells(text)
     if span is None:
         _screen.pop(row, None); _cells.pop(row, None)
-        return f"\033[{row};{col}H{text}"
+        return f"\033[{row};{col}H{text}" + (_layers_esc() if _layer_cols(row) else "")
     old = _cells.get(row) if row in _screen else None
     known = old if old is not None else []
     new = known + [_UNKNOWN] * max(0, col - 1 + len(span) - len(known))
@@ -363,10 +375,19 @@ def screen_span_paint(row: int, col: int, text: str) -> str:
             before[k] = _UNKNOWN                     # write them all, or it shows through the blanks
     new[col - 1:col - 1 + len(span)] = span
     _cells[row] = new
-    _screen[row] = _screen.get(row, "") + "\x00span"          # the row's text no longer says it all
+    _screen[row] = _marked(_screen.get(row, ""), "\x00span")   # the row's text no longer says it all
     out, spans = _cells_diff(row, before, new)
     _painted[row] = spans
     return out
+
+
+def _marked(key: str, mark: str) -> str:
+    """A row's key with `mark` on its end in place of any mark before: it no
+    longer matches any row paint's, and doesn't grow with every span
+    written into the row."""
+    while key.endswith(("\x00span", "\x00forgotten")):
+        key = key[:key.rindex("\x00")]
+    return key + mark
 
 
 _ESCAPE = re.compile(r'\x1b\[([0-9;]*)m|\x1b\[(\d+);(\d+)H|\x1b\[K|\x1b')
@@ -396,11 +417,25 @@ def _row_cells(text: str, extra: str = "") -> list | None:
             cells[col + 1] = (style, "")
         col += w
 
+    def put_run(run: str) -> None:
+        """A run of text between escapes: all one cell a character (most
+        are) in one slice, anything else a character at a time."""
+        nonlocal col
+        if not _narrow(run):
+            for ch in run:
+                put(ch)
+            return
+        end = col + len(run)
+        if end > len(cells):
+            cells.extend([_BLANK] * (end - len(cells)))
+        cells[col:end] = zip(repeat(style), run)
+        col = end
+
     for part in (text, extra):
         pos = 0
         for m in _ESCAPE.finditer(part):
-            for ch in part[pos:m.start()]:
-                put(ch)
+            if m.start() > pos:
+                put_run(part[pos:m.start()])
             pos = m.end()
             seq = m.group(0)
             if m.group(1) is not None:              # a colour or style
@@ -411,23 +446,33 @@ def _row_cells(text: str, extra: str = "") -> list | None:
                 del cells[col:]
             else:
                 return None
-        for ch in part[pos:]:
-            put(ch)
+        if pos < len(part):
+            put_run(part[pos:])
         style = ""
     return cells
+
+
+@functools.lru_cache(maxsize=4096)
+def _narrow(run: str) -> bool:
+    """Whether every character of `run` takes exactly one cell (kept: a
+    frame's runs, box edges and all, mostly repeat the last frame's)."""
+    return run.isascii() or all(ui.char_cols(ch) == 1 for ch in run)
 
 
 def _cells_diff(row: int, old: list, new: list) -> tuple[str, list]:
     """What writes row `row` from `old` cells to `new`: only the runs that
     changed (a run widened to keep wide characters whole), a shorter row's
     end erased; and those runs' columns (first, last; 1-based). Cells under
-    a floating box (screen_float) aren't written: it's over them."""
+    a layer (screen_layer) aren't written: it's over them."""
     n = max(len(old), len(new))
-    under = _float_cols(row)
+    under = _layer_cols(row)
     if under:                                        # no erasing to the end of the row past it: blanks
         new = list(new) + [_BLANK] * (n - len(new))
     cell = lambda cells, i: cells[i] if i < len(cells) else _BLANK      # noqa: E731
-    changed = [i for i in range(n) if cell(old, i) != cell(new, i) and i not in under]
+    changed = [i for i, (o, c) in enumerate(zip(old, new)) if o != c]
+    changed += [i for i in range(min(len(old), len(new)), n) if cell(old, i) != cell(new, i)]
+    if under:
+        changed = [i for i in changed if i not in under]
     if not changed:
         return "", []
     runs, start, last = [], changed[0], changed[0]
@@ -485,23 +530,98 @@ def screen_forget_cells(first_row: int, last_row: int, first_col: int, last_col:
             cells.append(_BLANK)
         for c in range(first_col - 1, last_col):
             cells[c] = _UNKNOWN
-        _screen[r] = _screen.get(r, "") + "\x00forgotten"       # so the row isn't skipped as unchanged
+        _screen[r] = _marked(_screen.get(r, ""), "\x00forgotten")   # so the row isn't skipped as unchanged
 
 
-_shown_pictures: list = []           # the last widget frame's pictures, for screen_restore
+_shown_pictures: list = []           # the last widget frame's pictures, drawn again where a layer over them goes
 
 
-# A box floating over the screen for a moment (screen_float: the volume as it
-# changes): its rows and columns, its lines, and when it goes. What's under
-# it is kept in the model as ever, just not written, and put back after.
-_float: dict = {}
+# Boxes over the screen: overlays (the : line, the panel picker) and the
+# volume as it changes, the newest on top. The screen under them is the
+# screen's as ever, painted into the model by its own code, but no cell under
+# a layer is written (_cells_diff), so nothing draws over a box. A layer that
+# goes writes back the cells it covered from the model, as they are by then,
+# and draws again the pictures it lay over. Nothing about a layer clears the
+# screen.
+_layers: list = []
 
 
-def _float_cols(row: int) -> set:
-    """The 0-based columns of `row` the floating box covers (none, mostly)."""
-    if not _float or not _float['top'] <= row < _float['top'] + len(_float['lines']):
-        return set()
-    return set(range(_float['left'] - 1, _float['left'] - 1 + _float['w']))
+def _layer_cols(row: int) -> set:
+    """The 0-based columns of `row` a layer covers (none, mostly)."""
+    cols: set = set()
+    for ly in _layers:
+        if ly['top'] <= row < ly['top'] + len(ly['lines']):
+            cols.update(range(ly['left'] - 1, ly['left'] - 1 + ly['w']))
+    return cols
+
+
+def _layers_esc() -> str:
+    """What draws every layer, bottom first, the cursor left where it was."""
+    if not _layers:
+        return ""
+    return "\0337" + "".join(f"\033[{ly['top'] + k};{ly['left']}H{C.RESET}{ln}{C.RESET}"
+                             for ly in _layers for k, ln in enumerate(ly['lines'])) + "\0338"
+
+
+def screen_layer(lines: list, top: int, left: int, layer: dict | None = None,
+                 until: float | None = None) -> dict:
+    """Show `lines` (a box, all one width) at (top, left) over the screen: a
+    new layer, or `layer` again, its lines or place changed. Returns the
+    layer, for the next call and screen_layer_close. `until`: the time it
+    goes by itself (float_tick); None, when it's closed."""
+    cols, rows = ui.get_terminal_size()
+    lines = [ui.clip_ansi(ln, max(0, cols - left + 1)) for ln in lines[:max(0, rows - top + 1)]]
+    w = max((ui.visual_len(ln) for ln in lines), default=0)
+    if layer is not None and layer in _layers:
+        old = (layer['top'], layer['left'], layer['w'], len(layer['lines']))
+        layer.update(lines=lines, top=top, left=left, w=w, until=until)
+        if old != (top, left, w, len(lines)) and layer['size'] == (cols, rows):
+            _write(_uncover(*old))            # what it moved off, back (at a new size the screen's redrawn anyway)
+        layer['size'] = (cols, rows)
+    else:
+        layer = dict(lines=lines, top=top, left=left, w=w, until=until, size=(cols, rows))
+        _layers.append(layer)
+    _write(_layers_esc())
+    return layer
+
+
+def screen_layer_close(layer: dict | None) -> None:
+    """Take `layer` away, putting back what it covered."""
+    if layer is None or layer not in _layers:
+        return
+    _layers.remove(layer)
+    if layer['size'] == ui.get_terminal_size():
+        _write(_uncover(layer['top'], layer['left'], layer['w'], len(layer['lines'])) + _layers_esc())
+
+
+def _uncover(top: int, left: int, w: int, h: int) -> str:
+    """What writes back, from the model, a rectangle a layer left (cells
+    another layer still covers stay its), then the pictures in it."""
+    out = []
+    for r in range(top, top + h):
+        cells = [_BLANK if c is _UNKNOWN else c for c in (_cells.get(r) or [])]   # unvouched for: blank
+        cells += [_BLANK] * max(0, left - 1 + w - len(cells))
+        before = cells[:left - 1] + [_UNKNOWN] * w + cells[left - 1 + w:]
+        out.append(_cells_diff(r, before, cells)[0])
+    for r, c, n, _k, esc, *size in _shown_pictures:
+        last = c + (size[0] if size else 10 ** 6) - 1
+        if r < top + h and r + n > top and c < left + w and last >= left:
+            out.append(f"\0337\033[{r};{c}H{esc}\0338")
+    for r, c, n, cw, redraw in list(_picture_areas.values()):
+        if redraw and r < top + h and r + n > top and c < left + w and c + cw > left:
+            _write("".join(out))
+            out = []
+            redraw()                           # its owner sends it; it's the owner's picture
+    return "".join(out)
+
+
+def _write(text: str) -> None:
+    if text:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+_floating: list = [None]             # screen_float's layer, while it's up
 
 
 def screen_float(lines: list, seconds: float) -> None:
@@ -512,12 +632,38 @@ def screen_float(lines: list, seconds: float) -> None:
     cols, rows = ui.get_terminal_size()
     lines = [ui.clip_ansi(ln, cols) for ln in lines[:rows]]
     w = max((ui.visual_len(ln) for ln in lines), default=0)
-    place = dict(w=w, top=max(1, (rows - len(lines)) // 2 + 1), left=max(1, (cols - w) // 2 + 1), size=(cols, rows))
-    if _float and _float['size'] == (cols, rows) and (len(_float['lines']), _float['w'], _float['top'], _float['left']) != (
-            len(lines), place['w'], place['top'], place['left']):
-        _float_gone()                # a new shape: put back what the old one covered (not at a new size: those cells are gone)
-    _float.update(lines=lines, until=time.time() + seconds, **place)
-    _float_draw()
+    _floating[0] = screen_layer(lines, max(1, (rows - len(lines)) // 2 + 1), max(1, (cols - w) // 2 + 1),
+                                _floating[0], until=time.time() + seconds)
+
+
+def screen_float_close() -> None:
+    """Take a floating box away now, putting back what it covered."""
+    screen_layer_close(_floating[0])
+    _floating[0] = None
+
+
+def float_tick() -> bool:
+    """Keep the layers on top while a floating box is up (a picture sent
+    over them is put under them again), and take it away when its time is
+    up. True when it just went."""
+    ly = _floating[0]
+    if ly is None or ly not in _layers:
+        _floating[0] = None
+        return False
+    if time.time() < ly['until']:
+        _write(_layers_esc())
+        return False
+    screen_float_close()
+    return True
+
+
+def _layers_wiped() -> None:
+    """The screen was cleared: a floating box goes with it (its owner shows
+    it again if it's still wanted); an overlay's layer stays, and is drawn
+    again by its owner, or round the rows painted next."""
+    if _floating[0] in _layers:
+        _layers.remove(_floating[0])
+    _floating[0] = None
 
 
 _backdrops: list = []                # the screens showing, innermost last: their redraw, and how they meet a small window
@@ -527,9 +673,9 @@ def screen_backdrop(redraw, small: bool = False) -> Callable[[], None]:
     """Say the screen now showing is this one, till the returned call (for
     its `finally`) takes it back. `redraw()` lays it out afresh at the current
     size, what an overlay over it calls on a resize; None: it notices a new
-    size itself (asked to with ui.request_relayout). `small`: it lays out a
-    window too small for boxes itself (the player, the miniplayer), so no
-    miniplayer takes over from it."""
+    size itself (asked to with ui.request_relayout) once the overlay's gone.
+    `small`: it lays out a window too small for boxes itself (the player,
+    the miniplayer), so no miniplayer takes over from it."""
     entry = {'redraw': redraw, 'small': small, 'overlay': False}
     _backdrops.append(entry)
     return lambda: _backdrops.remove(entry) if entry in _backdrops else None
@@ -549,34 +695,28 @@ def _screen_under_overlay() -> dict | None:
     return next((e for e in reversed(_backdrops) if not e['overlay']), None)
 
 
-def relayout_under_overlay() -> None:
-    """The window was resized while an overlay is open: the screen under it
-    lays itself out at the new size, where it can keep its boxes (smaller,
-    the overlay has the window to itself). The overlay then places itself
-    afresh over what's there now."""
-    _float.clear()                       # a floating box goes; its owner shows it again if it's still wanted
-    if box_fits():
-        redraw_under_overlay()
+def screen_under_shows() -> bool:
+    """Whether the screen under an overlay can show at this size: it keeps
+    its boxes here, or lays out a small window itself. Where it can't, it
+    isn't drawn at all (no box, no content), the overlay on its own."""
+    under = _screen_under_overlay()
+    return box_fits() or bool(under and under['small'])
 
 
 def redraw_under_overlay() -> None:
-    """The screen under an overlay drawn again, whole, at the current size:
-    by its redraw, or, with none to call, cleared and asked to lay itself out
-    (it notices at its next resize check)."""
+    """The screen under an overlay drawn again, whole, at the current size,
+    painting round the overlay's layer: by its redraw where it can show
+    here; else the screen left blank, and the screen asked to lay itself out
+    once it can (it notices at its next resize check)."""
     under = _screen_under_overlay()
-    if under and under['redraw'] is not None:
+    if under and under['redraw'] is not None and screen_under_shows():
         under['redraw']()
         return
+    log.debug("overlay: the screen under it %s, left blank till it lays itself out",
+              "can't show at this size" if under and under['redraw'] else "has no redraw")
     sys.stdout.write("\033[H\033[2J")
-    sys.stdout.flush()
-    screen_invalidate()
+    screen_cleared()
     ui.request_relayout()
-
-
-def screen_float_close() -> None:
-    """Take a floating box away now, putting back what it covered."""
-    if _float:
-        _float_gone()
 
 
 _PROGRESS_W = 64                     # the progress box's widest
@@ -598,53 +738,16 @@ def progress_float(message: str, progress: float) -> None:
     screen_float(lines, 24 * 3600)   # up till it's closed
 
 
-def _float_draw() -> None:
-    sys.stdout.write("\0337" + "".join(f"\033[{_float['top'] + k};{_float['left']}H{C.RESET}{ln}{C.RESET}"
-                                       for k, ln in enumerate(_float['lines'])) + "\0338")
-    sys.stdout.flush()
+_picture_areas: dict = {}            # pictures other screens draw themselves: name → (top, left, rows, cols, redraw)
 
 
-def _float_gone() -> None:
-    """Put back what the floating box covered, from the model, and any
-    picture of the screen it was over."""
-    top, left, w, h = _float['top'], _float['left'], _float['w'], len(_float['lines'])
-    _float.clear()
-    out = []
-    for r in range(top, top + h):
-        cells = list(_cells.get(r) or [])
-        cells += [_BLANK] * max(0, left - 1 + w - len(cells))
-        before = cells[:left - 1] + [_UNKNOWN] * w + cells[left - 1 + w:]
-        out.append(_cells_diff(r, before, cells)[0])
-    for r, c, n, _k, esc, *size in _shown_pictures:
-        last = c + (size[0] if size else 10 ** 6) - 1
-        if r < top + h and r + n > top and c < left + w and last >= left:
-            out.append(f"\0337\033[{r};{c}H{esc}\0338")
-    sys.stdout.write("".join(out))
-    sys.stdout.flush()
-
-
-def float_tick() -> bool:
-    """Keep a floating box on top while it's up (a picture sent over it is
-    put under it again), and take it away when its time is up. True when it
-    just went: a screen with a picture of its own under it redraws that."""
-    if not _float:
-        return False
-    if time.time() < _float['until']:
-        _float_draw()
-        return False
-    _float_gone()
-    return True
-
-
-_picture_areas: dict = {}            # pictures other screens draw themselves: name → (top, left, rows, cols)
-
-
-def screen_picture_area(name: str, area: tuple | None) -> None:
+def screen_picture_area(name: str, area: tuple | None, redraw=None) -> None:
     """Say a screen drawing its own picture (the player's cover) has one at
     `area` (top, left, rows, cols; 1-based), or None now it's gone: anything
-    drawn over it then writes every cell, so none of the image shows through."""
+    drawn over it then writes every cell, so none of the image shows through.
+    `redraw()` sends it again, after a layer over it goes."""
     if area:
-        _picture_areas[name] = area
+        _picture_areas[name] = (*area, redraw)
     else:
         _picture_areas.pop(name, None)
 
@@ -653,7 +756,7 @@ def _picture_cols(row: int) -> list[tuple[int, int]]:
     """The columns (first, last; 1-based) of `row` a picture covers."""
     return ([(c, c + size[0] - 1 if size else 10 ** 6)
              for r, c, n, _k, _esc, *size in _shown_pictures if r <= row < r + n]
-            + [(c, c + w - 1) for r, c, n, w in _picture_areas.values() if r <= row < r + n])
+            + [(c, c + w - 1) for r, c, n, w, _redraw in _picture_areas.values() if r <= row < r + n])
 
 
 def screen_forget_pictures() -> None:
@@ -666,53 +769,6 @@ def screen_forget_pictures() -> None:
         else:
             screen_forget_rows(r, r + n - 1)
     _shown_pictures.clear()
-
-
-_BORDER_CHARS = set("╭╮╰╯│─├┤┬┴┼┊┈")
-
-
-def screen_crosses_box(first_row: int, last_row: int, first_col: int, last_col: int) -> bool:
-    """Whether any box's border on screen lies in the rectangle (1-based,
-    inclusive): something drawn there would cut that box, leaving it half a
-    box. A rectangle wholly inside one box's inside crosses nothing."""
-    for r in range(first_row, last_row + 1):
-        cells = _cells.get(r) or []
-        for c in range(first_col - 1, min(last_col, len(cells))):
-            if cells[c] is not _UNKNOWN and cells[c][1] in _BORDER_CHARS:
-                return True
-    return False
-
-
-def screen_save(first_row: int, last_row: int, first_col: int, last_col: int) -> dict:
-    """What the painter holds in a rectangle, to put back with screen_restore
-    once something drawn over it (an overlay) is gone."""
-    return {'rect': (first_row, last_row, first_col, last_col),
-            'cells': {r: [(_cells.get(r) or [])[c] if c < len(_cells.get(r) or []) else _BLANK
-                          for c in range(first_col - 1, last_col)]
-                      for r in range(first_row, last_row + 1)}}
-
-
-def screen_restore(saved: dict) -> str:
-    """The escape that puts a saved rectangle back, cell by cell, and redraws
-    any picture (an image) it overlapped, which writing over it erased."""
-    r0, r1, c0, c1 = saved['rect']
-    out = []
-    for r, cells in saved['cells'].items():
-        text, cur = [], None
-        for st, ch in cells:
-            if ch is None:
-                st, ch = "", " "                      # a cell nothing vouched for: blank
-            if st != cur:
-                text.append(C.RESET + st)
-                cur = st
-            text.append(ch)
-        out.append(screen_span_paint(r, c0, "".join(text) + C.RESET))
-    for r, c, n, _k, esc, *size in _shown_pictures:
-        last = c + (size[0] if size else 10 ** 6) - 1
-        if r <= r1 and r + n - 1 >= r0 and c <= c1 and last >= c0:
-            out.append(f"\0337\033[{r};{c}H{esc}\0338")
-    return "".join(out)
-
 
 def screen_painted(row: int, first: int, last: int) -> bool:
     """Whether the last paint of `row` wrote any of columns first..last
@@ -756,7 +812,7 @@ def screen_paint(rows: dict, *, cursor: tuple | None = None,
 
 def _footer_box_str(rows: int, lines: list) -> str:
     """Escape string that draws the now-playing box in the rows just above the
-    breadcrumb, clearing any band a taller previous box left behind, through
+    status line, clearing any band a taller previous box left behind, through
     the screen model (unchanged rows write nothing). Keeps the box's height
     for the layout (footer_height_for_layout)."""
     if rows <= 1:
@@ -900,8 +956,7 @@ def _run_cramped() -> None:
         _cramped_showing[0] -= 1
         ui.set_tabs_hidden(tabs_were)
         sys.stdout.write("\033[H\033[2J")
-        sys.stdout.flush()
-        screen_invalidate()
+        screen_cleared()
         ui.request_relayout()
 
 
@@ -912,6 +967,112 @@ def wheel_at() -> tuple | None:
     """Where the last SCROLL_UP / SCROLL_DOWN happened, (row, col) 1-based:
     for a screen with more than one thing to scroll."""
     return _wheel_at[0]
+
+
+# Wheel momentum. A slow wheel or trackpad moves a step a notch; a fast one
+# moves further the faster it goes and coasts on after it stops, slowing to
+# a halt. A click while it coasts stops it dead, and the click does nothing else.
+WHEEL_SLOW_RATE = 12.0     # notches a second up to which a notch is just one step
+WHEEL_GAIN = 1.0           # extra steps a second per notch a second above that
+WHEEL_FRICTION = 2.5       # how fast a coast slows (its speed falls by e every 1/2.5 s)
+WHEEL_MIN_SPEED = 2.0      # steps a second under which a coast stops
+WHEEL_GAP_S = 0.25         # a pause this long between notches starts a new scroll
+WHEEL_SETTLE_S = 0.15      # a click this soon after a notch stops the scroll too
+
+_wheel = {'dir': 0, 'speed': 0.0, 'owed': 0.0, 'at': 0.0, 'last': 0.0, 'rate': 0.0, 'swallow': False,
+          'steady': 0}
+
+
+def wheel_steady(on: bool) -> None:
+    """For a screen whose wheel sets a value (a level) rather than scrolling:
+    while on, a notch is one step and never coasts. Pair each on with an off."""
+    _wheel['steady'] = max(0, _wheel['steady'] + (1 if on else -1))
+    _coast_stop()
+
+
+def _coast_stop() -> None:
+    _wheel.update(speed=0.0, owed=0.0)
+
+
+def _coast_advance(now: float) -> None:
+    """Move the coast on to `now`: the steps it has travelled added to what's
+    owed, its speed slowed by friction. Stopped once too slow to go on, or
+    when nothing has read keys for a while (it mustn't burst out after)."""
+    w = _wheel
+    dt, w['at'] = now - w['at'], now
+    if dt > WHEEL_GAP_S:
+        return _coast_stop()
+    decay = math.exp(-WHEEL_FRICTION * dt)
+    w['owed'] += w['speed'] * (1 - decay) / WHEEL_FRICTION
+    w['speed'] *= decay
+    if w['speed'] < WHEEL_MIN_SPEED and w['owed'] < 1:
+        _coast_stop()
+
+
+def _coast_wait() -> float:
+    """Seconds until the coast's next step is due (0: now)."""
+    w = _wheel
+    _coast_advance(time.monotonic())
+    if not w['speed']:
+        return 0.0
+    need = 1 - w['owed']
+    if need <= 0:
+        return 0.0
+    left = 1 - need * WHEEL_FRICTION / w['speed']
+    if left <= 0:                  # it stops before then: wake when it does
+        return max(0.01, math.log(w['speed'] / WHEEL_MIN_SPEED) / WHEEL_FRICTION)
+    return -math.log(left) / WHEEL_FRICTION
+
+
+def _coast_step() -> str | None:
+    """The coast's next SCROLL_UP / SCROLL_DOWN if one is due, else None."""
+    w = _wheel
+    if not w['speed']:
+        return None
+    _coast_advance(time.monotonic())
+    if w['owed'] < 1:
+        return None
+    w['owed'] -= 1
+    return 'SCROLL_UP' if w['dir'] < 0 else 'SCROLL_DOWN'
+
+
+def _wheel_seen(key: str) -> str | None:
+    """`key` as read, with the wheel's momentum kept up to date: a notch's
+    speed sets how far the scroll coasts on; a click while it moves stops it
+    and is swallowed (None), with its release; any other key stops it."""
+    w, now = _wheel, time.monotonic()
+    if key in ('SCROLL_UP', 'SCROLL_DOWN'):
+        d = -1 if key == 'SCROLL_UP' else 1
+        gap, w['last'] = now - w['last'], now
+        if d != w['dir'] or gap > WHEEL_GAP_S:
+            _coast_stop()
+            w.update(dir=d, rate=0.0, at=now)
+        else:
+            _coast_advance(now)
+            w['rate'] = (w['rate'] + 1 / max(gap, 1e-3)) / 2 if w['rate'] else 1 / max(gap, 1e-3)
+            if not w['steady']:
+                w['speed'] = max(w['speed'], (w['rate'] - WHEEL_SLOW_RATE) * WHEEL_GAIN)
+        return key
+    if key.startswith('MOUSE_CLICK:') and (w['speed'] or now - w['last'] < WHEEL_SETTLE_S):
+        _coast_stop()
+        w['last'], w['swallow'] = 0.0, True
+        return None
+    if key.startswith('MOUSE_RELEASE:') and w['swallow']:
+        w['swallow'] = False
+        return None
+    if not key.startswith('FOCUS_'):
+        _coast_stop()
+    return key
+
+
+def _poll_key(fd: int) -> str | None:
+    """The next key if one is waiting, a coasting wheel's due step included,
+    else None, without blocking."""
+    while _byte_ready(fd, 0):
+        key = _wheel_seen(_read_key_raw(fd))
+        if key:
+            return key
+    return _coast_step()
 
 
 def _idle_tick() -> None:
@@ -952,6 +1113,8 @@ def _wait_for_keypress(timeout: float = 0.05) -> bool:
                 return True
             time.sleep(0.01)
         return False
+    if _wheel['speed']:
+        timeout = min(timeout, _coast_wait())
     watch = [sys.stdin, _wake_r] if _wake_r >= 0 else [sys.stdin]
     ready = _sel.select(watch, [], [], timeout)[0]
     if _wake_r >= 0 and _wake_r in ready:
@@ -960,7 +1123,8 @@ def _wait_for_keypress(timeout: float = 0.05) -> bool:
         except OSError:
             pass
         _idle_tick()                      # a state change: the tick's work now (the box repainted at once)
-    return sys.stdin in ready             # a wake alone is not a keypress
+    # A wake alone is not a keypress; a coasting wheel's due step is.
+    return sys.stdin in ready or bool(_wheel['speed'] and not _coast_wait())
 
 
 
@@ -1165,19 +1329,19 @@ def box_lines(lines: list[str], width: int, height: int, title: str = "", right:
     title = " · ".join(tparts)
     name = f" {title} " if title else ""
     sub = " · ".join(sparts)
-    right = (f"{C.DIM}{sub}{C.RESET}" if sub else "") + (f"{C.DIM} ─ {C.RESET}" if sub and toggle else "") + toggle
+    right = (f"{C.DIM}{sub}{C.RESET}" if sub else "") + (f"{C.FRAME} ─ {C.RESET}" if sub and toggle else "") + toggle
     tail = f" {right} ─" if right else ""
     rule = max(1, width - 3 - ui.visual_len(name) - ui.visual_len(tail))
-    shade = C.PRIMARY if focused else C.DIM
-    tail = f"{C.DIM} {C.RESET}{right}{C.DIM} ─{C.RESET}" if right else ""
+    shade = C.ACCENT2 if focused else C.DIM
+    tail = f"{C.FRAME} {C.RESET}{right}{C.FRAME} ─{C.RESET}" if right else ""
     if dotted and tail:
         tail = tail.replace(" ─", f" {h}")
-    top = (f"{pad}{C.DIM}╭{h}{C.RESET}{shade}{C.BOLD}{name}{C.RESET}{C.DIM}{h * rule}{C.RESET}"
-           f"{tail}{C.DIM}╮{C.RESET}")
+    top = (f"{pad}{C.FRAME}╭{h}{C.RESET}{C.BOLD}{shade}{name}{C.RESET}{C.FRAME}{h * rule}{C.RESET}"
+           f"{tail}{C.FRAME}╮{C.RESET}")
     body = [_clip_ansi(ln, inner) for ln in lines[:max(0, height - 2)]]
     body += [""] * (max(0, height - 2) - len(body))
-    mid = [f"{pad}{C.DIM}{v}{C.RESET} {ln}{C.RESET}{' ' * (inner - ui.visual_len(ln))} {C.DIM}{v}{C.RESET}" for ln in body]
-    return [top, *mid, f"{pad}{C.DIM}╰{h * (width - 2)}╯{C.RESET}"]
+    mid = [f"{pad}{C.FRAME}{v}{C.RESET} {ln}{C.RESET}{' ' * (inner - ui.visual_len(ln))} {C.FRAME}{v}{C.RESET}" for ln in body]
+    return [top, *mid, f"{pad}{C.FRAME}╰{h * (width - 2)}╯{C.RESET}"]
 
 
 def whole_parts(text: str, room: int) -> str:
@@ -1199,7 +1363,7 @@ def border_right(subtitle: str | None, help_key: bool | None) -> str:
     toggle = help_corner_text(help_key)[0] if help_key is not None else ""
     if toggle:
         parts.append(toggle)
-    return f"{C.DIM} ─ {C.RESET}".join(parts)
+    return f"{C.FRAME} ─ {C.RESET}".join(parts)
 
 
 def wrap_path(path: str, width: int) -> list[str]:
@@ -1426,12 +1590,12 @@ def rounded_header(title: str, detail: str = "", right: str = "",
     left = f"{C.BOLD}{title}{C.RESET}{C.DIM}{detail}{C.RESET}"
     gap = max(1, inner - vl(title) - vl(detail) - tail)
     facts = f"{C.DIM}{right}{C.RESET}  " if right else ""
-    edge = f"{' ' * mh}{C.DIM}"
+    edge = f"{' ' * mh}{C.FRAME}"
     lines = [f"{edge}╭{'─' * (inner + 2)}╮{C.RESET}",
-             f"{edge}│{C.RESET} {left}{' ' * gap}{facts}{toggle} {C.DIM}│{C.RESET}"]
+             f"{edge}│{C.RESET} {left}{' ' * gap}{facts}{toggle} {C.FRAME}│{C.RESET}"]
     if subtitle:
         sub = _fit(subtitle, inner)
-        lines.append(f"{edge}│{C.RESET} {C.DIM}{sub}{' ' * (inner - vl(sub))}{C.RESET} {C.DIM}│{C.RESET}")
+        lines.append(f"{edge}│{C.RESET} {C.DIM}{sub}{' ' * (inner - vl(sub))}{C.RESET} {C.FRAME}│{C.RESET}")
     lines += [f"{edge}╰{'─' * (inner + 2)}╯{C.RESET}", ""]
     return lines
 
@@ -1785,7 +1949,9 @@ COL_GAP = 3
 class Column:
     """A column spec for a structured select() table (no string parsing).
 
-    style    : 'primary' | 'static-dim' | 'dynamic-dim' | 'accent' | 'normal'
+    style    : 'primary' | 'group' | 'heading' | 'static-dim' | 'dynamic-dim' | 'accent' | 'error' | 'normal'
+               (a row's None cell is merged into the one before it, which takes
+               both columns, its own column's style and left-aligned)
     align    : 'left' | 'right'
     flex     : absorbs leftover width, truncates (use for the title column)
     pin      : laid against the right edge (e.g. duration)
@@ -1823,16 +1989,20 @@ class Column:
 
 
 def _cell_text(cell) -> tuple[str, str | None]:
-    """Return (plain_text, style_override) for a str, (str, style) tuple, or list of segments."""
+    """Return (plain_text, style_override) for a str, (str, style) tuple, or
+    list of segments, or a callable giving one (worked out at each drawing, for
+    a cell that changes while the list is up)."""
+    if callable(cell):
+        cell = cell()
     if isinstance(cell, list):
-        return "".join(str(seg[0]) if isinstance(seg, tuple) else str(seg) for seg in cell), None
+        return ui.one_line("".join(str(seg[0]) if isinstance(seg, tuple) else str(seg) for seg in cell)), None
     if isinstance(cell, tuple):
-        return str(cell[0]), (cell[1] if len(cell) > 1 else None)
-    return str(cell), None
+        return ui.one_line(str(cell[0])), (cell[1] if len(cell) > 1 else None)
+    return ui.one_line(str(cell)), None
 
 
 def _style_cell(text: str, style: str, is_current: bool) -> str:
-    """Apply a named cell style (dim/dynamic-dim/accent/primary/normal) to text."""
+    """Apply a named cell style (dim/dynamic-dim/accent/error/primary/normal) to text."""
     if not text:
         return ""
     if style in ('dim', 'static-dim'):
@@ -1841,8 +2011,14 @@ def _style_cell(text: str, style: str, is_current: bool) -> str:
         return f"{C.BOLD}{C.DIM}{text}{C.RESET}" if is_current else f"{C.DIM}{text}{C.RESET}"
     if style == 'accent':
         return f"{C.ACCENT}{text}{C.RESET}"
+    if style == 'error':
+        return f"{C.ERROR}{text}{C.RESET}"
     if style == 'primary':
         return f"{C.BOLD}{text}{C.RESET}" if is_current else text
+    if style == 'group':
+        return f"{C.GROUP}{text}{C.RESET}"
+    if style == 'heading':
+        return f"{C.HEADING}{text}{C.RESET}"
     if style == 'cursor':
         # The block cursor as a cell segment; see block_cursor(), which does the
         # same thing where a whole line rather than a table cell is being drawn.
@@ -1852,14 +2028,17 @@ def _style_cell(text: str, style: str, is_current: bool) -> str:
 
 def _render_cell_segments(cell, style: str, is_current: bool, width: int, align: str,
                           force_dim: bool = False) -> str:
-    """Render a cell (plain text or list of styled segments), truncated/padded
-    to `width` and aligned."""
+    """Render a cell (plain text or list of styled segments, or a callable
+    giving one), truncated/padded to `width` and aligned."""
+    if callable(cell):
+        cell = cell()
     if isinstance(cell, list):
         parts = []
         raw_len = 0
         remaining = width
         for seg in cell:
             t, s = (str(seg[0]), seg[1]) if isinstance(seg, tuple) else (str(seg), style)
+            t = ui.one_line(t)                  # a row is one line: no break or return may reach the screen
             if force_dim:
                 s = 'dynamic-dim'
             if remaining <= 0:
@@ -1921,13 +2100,15 @@ def _table_widths(rows_cells: list, columns: list, eff: int,
     content = [0] * ncol
     for cells in rows_cells:
         for i in range(min(ncol, len(cells))):
-            content[i] = max(content[i], ui.visual_len(_cell_text(cells[i])[0]))
+            if not _spans(cells, i) and cells[i] is not None:
+                content[i] = max(content[i], ui.visual_len(_cell_text(cells[i])[0]))
 
     # What each column actually has to show in the window on screen.
     shown = [0] * ncol
     for cells in (rows_cells if visible_cells is None else visible_cells):
         for i in range(min(ncol, len(cells))):
-            shown[i] = max(shown[i], ui.visual_len(_cell_text(cells[i])[0]))
+            if not _spans(cells, i) and cells[i] is not None:
+                shown[i] = max(shown[i], ui.visual_len(_cell_text(cells[i])[0]))
 
     def _cap(col) -> int | None:
         """The hard upper bound a column may reach (max_frac / max_width), or None."""
@@ -2034,6 +2215,53 @@ def _table_widths(rows_cells: list, columns: list, eff: int,
     return widths
 
 
+def _spans(cells: list, i: int) -> bool:
+    """Whether cell i runs on over the next column: a row's None cell is
+    merged into the one before it (a heading across a number and a title)."""
+    return i + 1 < len(cells) and cells[i + 1] is None and cells[i] is not None
+
+
+def span_width(cells: list, columns: list, widths: list, i: int, eff: int, right_margin: int,
+               prefix: int = 3) -> int:
+    """Cell i's width: its column's, and each merged column's after it with
+    the gap before it. One merged through the last of the left block takes
+    the room up to the pinned block too. `prefix`: the row's columns before
+    its first cell (the pointer, and a checkbox's)."""
+    w, j = widths[i], i + 1
+    while j < len(cells) and j < len(columns) and cells[j] is None and not columns[j].pin:
+        if widths[j] >= 0:
+            w += columns[j].gap + widths[j]
+        j += 1
+    if j > i + 1 and not any(not c.pin and widths[k] >= 0 for k, c in enumerate(columns) if k >= j):
+        left = prefix + sum(c.gap + widths[k] for k, c in enumerate(columns) if not c.pin and widths[k] >= 0)
+        right = sum(c.gap + widths[k] for k, c in enumerate(columns) if c.pin and widths[k] >= 0)
+        w += max(0, (eff - right_margin) - left - right - 2) if right else 0
+    return w
+
+
+def _left_cells(cells: list, columns: list, widths: list, eff: int, right_margin: int, prefix: int):
+    """The left block's cells to draw: (index, column, width, align), a
+    spanning cell left-aligned across the columns it takes."""
+    for i, col in enumerate(columns):
+        if col.pin or widths[i] < 0 or (i < len(cells) and cells[i] is None):
+            continue
+        yield (i, col, span_width(cells, columns, widths, i, eff, right_margin, prefix), 'left') \
+            if _spans(cells, i) else (i, col, widths[i], col.align)
+
+
+def edit_segments(text: str, pos: int, cycling: bool = False) -> list:
+    """A table cell under edit, as styled segments: a value being stepped
+    through (`cycling`: ▾, ↑↓ step it), or a text field with its caret at
+    `pos`. Segments rather than raw ANSI: the table measures a cell by
+    the length of its text, so escape codes inside one would be counted as
+    visible and the cell truncated to nothing."""
+    if cycling:
+        return [("▾ ", 'accent'), (text, 'primary')]
+    if pos >= len(text):
+        return [(text, 'primary'), (" ", 'cursor')]
+    return [(text[:pos], 'primary'), (text[pos], 'cursor'), (text[pos + 1:], 'primary')]
+
+
 def _render_table_row(cells: list, columns: list, is_current: bool,
                       widths: list[int], eff: int, right_margin: int,
                       is_checked: bool | None = None,
@@ -2052,11 +2280,9 @@ def _render_table_row(cells: list, columns: list, is_current: bool,
             left = f"    {C.DIM}•{C.RESET}"   # 4 spaces + dim bullet = same as "    •"
         else:
             left = "   "                        # 3 spaces, same as single-select non-current
-        for i, col in enumerate(columns):
-            if not col.pin and widths[i] >= 0:
-                left += " " * col.gap + _render_cell_segments(
-                    cells[i] if i < len(cells) else "", 'dynamic-dim', False, widths[i], col.align,
-                    force_dim=True)
+        for i, col, w, align in _left_cells(cells, columns, widths, eff, right_margin, ui.visual_len(left)):
+            left += " " * col.gap + _render_cell_segments(
+                cells[i] if i < len(cells) else "", 'dynamic-dim', False, w, align, force_dim=True)
         right = ""
         for i, col in enumerate(columns):
             if col.pin and widths[i] >= 0:
@@ -2072,13 +2298,11 @@ def _render_table_row(cells: list, columns: list, is_current: bool,
     if is_checked is None:
         left = f"  {pointer}"
     else:
-        glyph = f"{C.GREEN}✔{C.RESET}" if is_checked else f"{C.DIM}•{C.RESET}"
+        glyph = f"{C.OK}✔{C.RESET}" if is_checked else f"{C.DIM}•{C.RESET}"
         left = f"  {pointer} {glyph}"
-    for i, col in enumerate(columns):
-        if not col.pin and widths[i] >= 0:
-            left += " " * col.gap + _render_cell_segments(
-                cells[i] if i < len(cells) else "", col.style, is_current, widths[i], col.align,
-                force_dim=dim)
+    for i, col, w, align in _left_cells(cells, columns, widths, eff, right_margin, ui.visual_len(left)):
+        left += " " * col.gap + _render_cell_segments(
+            cells[i] if i < len(cells) else "", col.style, is_current, w, align, force_dim=dim)
 
     right = ""
     for i, col in enumerate(columns):
@@ -2133,7 +2357,7 @@ def block_cursor(text: str, pos: int, base: str = '') -> str:
     """
     close = f"{C.RESET}{base}"
     if pos >= len(text):
-        return f"{text}{C.BACK}█{close}"
+        return f"{text}{C.INVERT}█{close}"
     return f"{text[:pos]}{C.INVERT}{C.BOLD}{text[pos]}{close}{text[pos + 1:]}"
 
 
@@ -2182,10 +2406,16 @@ def _norm(choices: list) -> list:
 def _read_key(fd: int) -> str:
     """Read one key, discarding focus-out events. Focus-in is passed on: the
     terminal may not have painted us while unfocused, so every widget repaints
-    on it (consume_chrome answers it with a full redraw)."""
+    on it (consume_chrome answers it with a full redraw). A coasting wheel's
+    steps come through here too (see _wheel_seen)."""
     while True:
-        key = _read_key_raw(fd)
-        if key != 'FOCUS_OUT':
+        if _wheel['speed'] and not _byte_ready(fd, _coast_wait()):
+            key = _coast_step()
+            if key:
+                return key
+            continue
+        key = _wheel_seen(_read_key_raw(fd))
+        if key and key != 'FOCUS_OUT':
             return key
 
 
@@ -2423,7 +2653,7 @@ class _Widget:
                 # A real clear only for a resize (or after another view owned the
                 # screen): the terminal reflowed, so nothing on it can be trusted.
                 sys.stdout.write("\033[H\033[2J" + C.HIDE)
-                screen_invalidate()
+                screen_cleared()
             else:
                 # First frame of a new widget: take the screen over in the paint
                 # itself, so moving between screens never shows a blank one.
@@ -2466,6 +2696,8 @@ class _Widget:
                 parts.append(f"\0337\033[{r};{c}H{esc}\0338")
         _shown_pictures[:] = self.pictures
         parts.append(footer_box_segment())
+        if len(parts) > 1 and _layers:
+            parts.append(_layers_esc())       # a picture sent over a layer goes under it again
         out = "".join(p for p in parts if p)
         if out != C.HIDE:
             sys.stdout.write(out)
@@ -2479,7 +2711,7 @@ class _Widget:
         """
         sys.stdout.write("\033[H\033[3J\033[J" + C.HIDE)
         sys.stdout.flush()
-        screen_invalidate()
+        screen_cleared()
         self.last_h = 0
         self.row    = None
         self._full  = True
@@ -2508,8 +2740,9 @@ def run_dashboard(render, interval: float = 1.0, quit_action: str = "list.quit",
     view is cleared and redrawn when it returns.
 
     `on_quit()`, if given, runs after the terminal is restored (cursor
-    back, raw mode undone) - the place for a "stop the background work
-    too?" confirm().
+    back, raw mode undone, and the main screen back when the view brought up
+    the alternate one, which it does unless it's already up) - the place for a
+    "stop the background work too?" confirm().
 
     `hints`, if given, are the view's (key, label) pairs, or a callable giving
     them (for keys that can be rebound while it runs): they go in the hint
@@ -2537,6 +2770,9 @@ def run_dashboard(render, interval: float = 1.0, quit_action: str = "list.quit",
             return lines
         return append_chrome(lines, hints() if callable(hints) else hints, cells, help_key=True)
 
+    own_screen = is_tty and not ui._in_app[0]       # a view on its own: its own screen, as the apps have
+    if own_screen:
+        ui.enter_alt_screen()
     w = _Widget(fd)
     screen_takeover_next()
     if is_tty and hints is not None:
@@ -2580,6 +2816,8 @@ def run_dashboard(render, interval: float = 1.0, quit_action: str = "list.quit",
             if hints is not None:
                 disable_mouse()
             _restore_term_attrs(fd, old_settings)
+        if own_screen:
+            ui.exit_alt_screen()
         sys.stdout.write("\033[?25h\n")
 
     if on_quit is not None:

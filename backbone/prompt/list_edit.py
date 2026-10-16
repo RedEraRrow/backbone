@@ -1,20 +1,21 @@
 """list_edit: the multi-column row editor (people, timestamps, pasted or imported rows)."""
 from __future__ import annotations
+import os
 import re
 import sys
-import os
+import textwrap
 from backbone.prompt.core import (
-    _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, _hint, block_cursor,
-    block_cursor_width, _read_key, _visible_rows, _cols, _Widget, add_hint_click_cells,
-    FOOTER_ACTIONS, footer_click_action, _hint_pin_target, screen_takeover_next, add_help_corner,
-    box_fits, boxed_frame, place_help_toggle,
+    _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, _read_key, _cols, _Widget,
+    FOOTER_ACTIONS, footer_click_action, screen_takeover_next, box_fits, Column,
+    _render_cell_segments, _table_widths, edit_segments,
 )
 from backbone import keys, ui
 from backbone import datetime_parse as dtp
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import (
-    CHROME_HANDLED, chrome_hint_pairs, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, MODE_TOGGLE, move_hint,
+    CHROME_HANDLED, CHROME_REDRAW, boxed_chrome, chrome_room, consume_chrome, disable_mouse, enable_mouse,
+    MODE_TOGGLE, move_hint,
 )
 from backbone.prompt.lists import confirm
 from backbone.prompt.text import multiline, path
@@ -32,13 +33,7 @@ from backbone.prompt.core import edit_line
 # straight into the next instead of needing Tab between them.
 # ---------------------------------------------------------------------------
 _TS_MASK  = "YYYY-MM-DD HH:MM:SS"
-
-
 _TS_SLOTS = tuple(i for i, ch in enumerate(_TS_MASK) if ch.isalpha())
-
-
-# Where each part starts, as an index into _TS_SLOTS: Y, M, D, h, m, s.
-_TS_PARTS = ((0, 4), (4, 6), (6, 8), (8, 10), (10, 12), (12, 14))
 
 
 # The table editor's own keys; moving, saving (choose), back and quit are the
@@ -114,321 +109,88 @@ def _ts_step(pos: int, delta: int) -> int:
     return slots[k]
 
 
-def _render_timestamp_cell(buf: list, pos: int, width: int, active: bool,
-                           base: str = '') -> str:
-    """Draw a timestamp cell: entered digits bright, unfilled mask slots dim.
-
-    `base` is the styling the surrounding row is already drawn in (the selected
-    row's colour + bold).  Every span closes by resetting AND re-asserting it,
-    because a bare reset would end the row's own styling too: the dim separator
-    after the year would leave the rest of the stamp, and every column after it,
-    unstyled.  Same rule the lyric renderer follows for markdown emphasis.
-    """
-    close = f"{C.RESET}{base}"
-    out = []
-    for i, ch in enumerate(buf):
-        placeholder = not ch.isdigit()
-        if active and i == pos:
-            out.append(f"{C.INVERT}{C.BOLD}{ch}{close}")
-        elif placeholder:
-            # Reset before dimming: on the selected row `base` is bold, and
-            # bold+dim together is contradictory (terminals disagree on which
-            # wins), which left the separators as bold as the digits.
-            out.append(f"{C.RESET}{C.DIM}{ch}{close}")
-        else:
-            out.append(ch)
-    text = "".join(out)
-    return text + " " * max(0, width - len(buf))
+def _ts_segments(buf: list, pos: int = -1) -> list:
+    """A timestamp cell as styled segments: the digits entered, the mask's
+    unfilled slots dim, so the shape being filled in is always on screen;
+    the caret on slot `pos` (-1: none)."""
+    return [(ch, 'cursor' if i == pos else ('normal' if ch.isdigit() else 'dim')) for i, ch in enumerate(buf)]
 
 
-def _render_list_edit_cell(text: str, width: int, is_editing: bool, is_active_col: bool,
-                           edit_buf: list[str], edit_pos: int,
-                           is_timestamp: bool = False, base: str = '') -> str:
-    """Render one table cell, showing the live edit buffer with a cursor block when this is the active editing column.
-
-    `base` is the row's own styling, re-asserted after any span this cell closes
-    so the rest of the row keeps it (see :func:`_render_timestamp_cell`).
-    """
-    if not is_editing or not is_active_col:
-        if is_timestamp:
-            # Always draw the mask, even for an empty cell: it shows the shape
-            # waiting to be filled, and it keeps the cell a fixed width so the
-            # columns after it don't slide left on an empty row.
-            return _render_timestamp_cell(_ts_buffer(text), -1, width, False, base)
-        return ui.truncate_text(text, width)
-
-    if is_timestamp:
-        return _render_timestamp_cell(edit_buf, edit_pos, width, True, base)
-
-    buf_str = "".join(edit_buf)
-    display_str = block_cursor(buf_str, edit_pos, base)
-    padding = max(0, width - block_cursor_width(buf_str, edit_pos))
-    return display_str + (" " * padding)
+def _row_values(item, num_cols: int) -> list:
+    """A row's cells as num_cols strings (a one-column row is its value)."""
+    vals = [str(v) for v in item] if isinstance(item, (list, tuple)) else [str(item)]
+    return (vals + [""] * num_cols)[:num_cols]
 
 
-def _layout_columns(num_cols: int, avail_w: int, col_ratios=None, col_mins=None) -> list:
-    """Split `avail_w` across the columns, honouring per-column minimums.
+def table_lines(headers: tuple, rows: list, width: int, *, cursor: int | None = None,
+                mins: tuple | None = None, first: int = 0, count: int | None = None) -> list[str]:
+    """`rows` (each a list of cells: text, or styled segments) as a ruled
+    grid `width` wide: the headings over a rule, the columns divided, each
+    as wide as what's in it (`mins`: at least) and the last taking the rest,
+    row `cursor` on the bar. Shows rows[first:first + count], laid out by
+    them all, so the columns hold still as it scrolls. What the table editor
+    shows, and anything showing such a table (a tag's people)."""
+    n = len(headers)
+    mins = list(mins or ()) + [0] * n
+    columns = [Column(style='primary', min_width=mins[j], gap=1 if j == 0 else 3, flex=j == n - 1)
+               for j in range(n)]
+    widths = [max(0, w) for w in _table_widths([list(headers)] + rows, columns, width, pointer_w=0, right_margin=1)]
+    widths[-1] += max(0, width - sum(widths) - 2 * n - (n - 1))        # the last column to the edge
+    div = f"{C.FRAME}│{C.RESET}"
 
-    Ratios (or an even split) set the starting widths; any column below its
-    minimum is then raised to it and the difference taken back from whichever
-    columns have the most room to spare.  A minimum is what keeps a fixed-shape
-    cell (a full timestamp, say) readable at any terminal width while the
-    short columns beside it shrink instead.
-    """
-    if col_ratios and len(col_ratios) == num_cols:
-        total = sum(col_ratios) or 1
-        widths = [max(1, int(avail_w * r / total)) for r in col_ratios]
-        widths[-1] = max(1, avail_w - sum(widths[:-1]))
-    else:
-        even = avail_w // num_cols
-        widths = [even] * (num_cols - 1) + [avail_w - even * (num_cols - 1)]
+    def line(cells: list, current: bool = False) -> str:
+        return " " + f" {div} ".join(
+            _render_cell_segments(cells[j] if j < len(cells) else "", columns[j].style, current, widths[j], 'left')
+            for j in range(n)) + " "
 
-    if not col_mins:
-        return widths
-    mins = list(col_mins)[:num_cols] + [0] * max(0, num_cols - len(col_mins))
-    mins = [max(0, int(m or 0)) for m in mins]
-
-    if sum(mins) >= avail_w:
-        # Too narrow to satisfy every minimum: share it out in their proportion
-        # rather than starving the last column to nothing.
-        total = sum(mins) or 1
-        shared = [max(1, int(avail_w * m / total)) for m in mins]
-        # Hand the truncation remainder to the widest column so the row still
-        # uses the full width instead of leaving a ragged gap.
-        spare = avail_w - sum(shared)
-        if spare > 0:
-            shared[max(range(num_cols), key=lambda i: shared[i])] += spare
-        return shared
-
-    deficit = 0
-    for i, m in enumerate(mins):
-        if widths[i] < m:
-            deficit += m - widths[i]
-            widths[i] = m
-    while deficit > 0:
-        slack = [widths[i] - mins[i] for i in range(num_cols)]
-        best = max(range(num_cols), key=lambda i: slack[i])
-        if slack[best] <= 0:
-            break
-        take = min(deficit, slack[best])
-        widths[best] -= take
-        deficit -= take
-
-    drift = avail_w - sum(widths)
-    if drift:
-        slack = [widths[i] - mins[i] for i in range(num_cols)]
-        target = max(range(num_cols), key=lambda i: slack[i]) if drift < 0 else num_cols - 1
-        widths[target] = max(1, widths[target] + drift)
-    return widths
+    out = [line([[(h, 'heading')] for h in headers]),
+           C.FRAME + "┼".join("─" * (w + 2) for w in widths) + C.RESET]
+    for i in range(first, len(rows) if count is None else min(len(rows), first + count)):
+        out.append(ui.on_bar(line(rows[i], True), width) if i == cursor else line(rows[i]))
+    return out
 
 
-def _build_list_edit_lines(
-    message: str, items: list, headers: tuple[str, ...],
-    cursor: int, viewport: int,
-    edit_mode: bool, edit_col: int, edit_buf: list[str], edit_pos: int,
-    fixed_rows: bool = False,
-    barrel_mode: bool = False, barrel_hints: list[str] | None = None, barrel_idx: int = 0,
-    col_ratios: tuple | None = None, col_mins: tuple | None = None,
-    col_types: dict | None = None,
-) -> tuple[list[str], int, int, int]:
-    """Lay out the full list_edit screen (header, column-aligned rows or barrel-mode cell, hints)
-    and report the resulting viewport/visible-row/header-row counts."""
+def _build_list_edit_lines(message: str, items: list, headers: tuple, cursor: int, viewport: int,
+                           editing: tuple | None, pairs: list, cells: dict, note: str = "",
+                           col_mins: tuple | None = None, col_types: dict | None = None, can_add: bool = True):
+    """The table editor's frame: the rows as a ruled grid (table_lines), the
+    highlighted one on the bar, in a box titled `message` down to the hint
+    bar. `editing` is the highlighted row's cell under edit, (column, its
+    segments), or None. `note`, dim at the top of the box, says what to put
+    in the rows. Returns (lines, viewport, rows shown, the line the first
+    row is on)."""
     num_cols = len(headers)
-    cols = _cols()
-    ui.footer_lines(ui.get_terminal_width())   # refresh box height (see select._lines)
-    c = cols - 4
-    inner = c
-    out = []
-
-    L = keys.label
-    _imports = {L("table.import_text"): "import text", L("table.import_file"): "from file"}
-    _end = {L("list.back", most=1): "back", L("list.choose", most=1): "save", L("list.quit"): "quit app"}
-    if fixed_rows:
-        base_hints = {L("list.up", "list.down"): "move", L("table.edit"): "edit", **_imports, **_end}
-    else:
-        base_hints = {L("list.up", "list.down"): "move", L("table.add"): "add", L("table.edit"): "edit",
-                      L("table.delete", most=1): "delete", move_hint()[0]: move_hint()[1], **_imports, **_end}
-    # Both variants answer ^t (see list_edit's key loop), so both advertise it.
-    if chrome._value_toggle_enabled:
-        base_hints[keys.label("global.raw_text")] = "raw text"
-    edit_hints = {"tab/⇧tab": "column", "esc": "back", "↵": "save"}
-
+    types = col_types or {}
+    mins = [max(m, len(_TS_MASK) if types.get(j) == 'timestamp' else 0)
+            for j, m in enumerate(list(col_mins or ()) + [0] * num_cols)][:num_cols]
     boxed = box_fits()
-    if not boxed:                                    # no box: the message is a line over the list
-        out.append(f"  {C.DIM}{message}{C.RESET}")
+    inner = _cols() - (4 if boxed else 0)            # inside the box's "│ " and " │"
 
-    avail_w = max(10, inner - 4 - (2 * (num_cols - 1)))
-    col_widths = _layout_columns(num_cols, avail_w, col_ratios, col_mins)
-    last_w = col_widths[-1]
+    def shown(i: int) -> list:
+        vals = _row_values(items[i], num_cols)
+        out: list = [_ts_segments(_ts_buffer(v)) if types.get(j) == 'timestamp' else v
+                     for j, v in enumerate(vals)]
+        if editing is not None and i == cursor:
+            out[editing[0]] = editing[1]
+        return out
 
-    if num_cols > 1:
-        h_parts = [f"{headers[i]:<{col_widths[i]}}" for i in range(num_cols - 1)]
-        h_parts.append(f"{headers[-1]}")
-        out.append(f"    {C.DIM}{'  '.join(h_parts)}{C.RESET}")
-
-        u_parts = ["─" * col_widths[i] for i in range(num_cols - 1)]
-        # The last column absorbs whatever width is left over, so rule it to what
-        # it actually holds; otherwise the underline trails far past the content
-        # as a long bar of nothing.
-        _last_content = max([len(headers[-1])] + [
-            len(str((list(it) if isinstance(it, (list, tuple)) else [it])[num_cols - 1]))
-            for it in items
-            if len(list(it) if isinstance(it, (list, tuple)) else [it]) >= num_cols] or [0])
-        u_parts.append("─" * max(1, min(last_w, _last_content)))
-        out.append(f"    {'  '.join(u_parts)}")
-    else:
-        out.append(f"    {C.DIM}{headers[0]}{C.RESET}")
-        out.append(f"    {'─' * inner}")
-
-    if edit_mode and (col_types or {}).get(edit_col) == 'timestamp':
-        edit_hints = {"←→": "move part", "tab/⇧tab": "column",
-                      "esc": "back", "↵": "save"}
-    if barrel_mode:
-        edit_hints = {"↑↓": "cycle", "↵": "confirm", "esc": "back"}
-    # Augment with the transport keys here (not at the call site) so the pairs
-    # handed back for the click map match exactly what was drawn.
-    active_hints = chrome_hint_pairs(edit_hints if edit_mode else base_hints)
-    hint_res = _hint(*active_hints)
-    hint_raw = hint_res[0] if isinstance(hint_res, tuple) else hint_res
-    hint_lines = hint_raw.split("\n") if hint_raw else []
-
-    # Boxed, the message is the box's title, in its top border: one row, where
-    # unboxed it's the message and a separator.
-    _LEDIT_HEADER_ROWS = 3   # (box top | the message line) + col-headers + col-underline
-    _LEDIT_FOOTER_ROWS = 1   # bottom separator (hints follow immediately)
-    fixed_overhead = _LEDIT_HEADER_ROWS + _LEDIT_FOOTER_ROWS + len(hint_lines)
-    vis = max(2, _visible_rows() - fixed_overhead)
+    top = [f"   {C.DIM}{ln}{C.RESET}" for ln in textwrap.wrap(note, max(10, inner - 2))] + ([""] if note else [])
+    vis = max(1, chrome_room(pairs) - (2 if boxed else 1) - len(top) - 2)    # the headings and their rule
     n = len(items)
-
     if cursor < viewport:
         viewport = cursor
     elif cursor >= viewport + vis:
         viewport = cursor - vis + 1
-    # See select(): don't leave the list scrolled once more rows fit.
-    viewport = max(0, min(viewport, n - vis))
+    viewport = max(0, min(viewport, n - vis))   # see select(): no scrolled-off rows once they fit
 
-    if n == 0:
-        out.append(f"    {C.DIM}(empty list){C.RESET}")
-    else:
-        hints = barrel_hints or []
-        n_hints = len(hints)
-        cur_text  = hints[barrel_idx] if barrel_mode and hints else ""
-        show_above = barrel_mode and n_hints >= 3
-        prev_text = hints[(barrel_idx - 1) % n_hints] if show_above else ""
-        next_text = hints[(barrel_idx + 1) % n_hints] if barrel_mode and n_hints >= 2 else ""
-
-        for i in range(viewport, min(viewport + vis, n)):
-            item = items[i]
-            is_sel = (i == cursor)
-
-            row_is_editing = (is_sel and edit_mode)
-            cursor_glyph = f"{C.ACCENT}›{C.RESET}" if (is_sel and not edit_mode) else (" " if not row_is_editing else "✎")
-
-            if num_cols > 1:
-                i_vals = list(item) if isinstance(item, (list, tuple)) else [str(item)]
-                while len(i_vals) < num_cols: i_vals.append("")
-
-                if row_is_editing and barrel_mode:
-                    def _barrel_above(w: int, is_barrel_col: bool) -> str:
-                        """Preview line for the barrel-mode value one step before the current one."""
-                        if not is_barrel_col:
-                            return " " * w
-                        if prev_text:
-                            return f"{C.ACCENT}⌃{C.RESET} {C.DIM}{ui.truncate_text(prev_text, w - 2)}{C.RESET}"
-                        return " " * w
-
-                    def _barrel_mid(w: int, is_barrel_col: bool, val: str) -> str:
-                        """Current barrel-mode value (or the plain cell) for this column."""
-                        if not is_barrel_col:
-                            return f"{val:<{w}}"
-                        return f"{C.PRIMARY}{C.BOLD}{ui.truncate_text(cur_text, w)}{C.RESET}"
-
-                    def _barrel_below(w: int, is_barrel_col: bool) -> str:
-                        """Preview line for the barrel-mode value one step after the current one."""
-                        if not is_barrel_col:
-                            return " " * w
-                        if next_text:
-                            return f"{C.ACCENT}⌄{C.RESET} {C.DIM}{ui.truncate_text(next_text, w - 2)}{C.RESET}"
-                        return " " * w
-
-                    mid_parts, below_parts = [], []
-                    above_parts: list[str] = []
-                    for j in range(num_cols - 1):
-                        bc = (edit_col == j)
-                        above_parts.append(_barrel_above(col_widths[j], bc))
-                        mid_parts.append(_barrel_mid(col_widths[j], bc, str(i_vals[j])))
-                        below_parts.append(_barrel_below(col_widths[j], bc))
-                    bc_last = (edit_col == num_cols - 1)
-                    above_parts.append(_barrel_above(last_w, bc_last))
-                    mid_parts.append(_barrel_mid(last_w, bc_last, str(i_vals[-1])))
-                    below_parts.append(_barrel_below(last_w, bc_last))
-
-                    sep = "  "
-                    if show_above:
-                        out.append(f"    {sep.join(above_parts)}")
-                    out.append(f"  ✎ {sep.join(mid_parts)}")
-                    out.append(f"    {sep.join(below_parts)}")
-                    continue
-
-                types = col_types or {}
-                # The selected row is wrapped in colour + bold below; cells have
-                # to re-assert that after any span they close, or the row loses
-                # its styling from the first styled character onward.
-                row_base = f"{C.PRIMARY}{C.BOLD}" if (is_sel and not edit_mode) else ''
-                row_parts = []
-                for j in range(num_cols - 1):
-                    cw = col_widths[j]
-                    ts = types.get(j) == 'timestamp'
-                    cell_str = _render_list_edit_cell(str(i_vals[j]), cw, row_is_editing,
-                                                      edit_col == j, edit_buf, edit_pos, ts, row_base)
-                    row_parts.append(f"{cell_str:<{cw}}"
-                                     if not ((row_is_editing and edit_col == j) or ts) else cell_str)
-
-                last_cell = _render_list_edit_cell(str(i_vals[-1]), last_w, row_is_editing,
-                                                   edit_col == (num_cols - 1), edit_buf, edit_pos,
-                                                   types.get(num_cols - 1) == 'timestamp', row_base)
-                row_parts.append(last_cell)
-
-                row_str = "  ".join(row_parts)
-
-                if is_sel and not edit_mode:
-                    out.append(f"  {cursor_glyph} {C.PRIMARY}{C.BOLD}{row_str}{C.RESET}")
-                else:
-                    out.append(f"  {cursor_glyph} {row_str}")
-            else:
-                val_str = str(item)
-
-                if row_is_editing and barrel_mode:
-                    w = inner - 4
-                    mid   = f"{C.PRIMARY}{C.BOLD}{ui.truncate_text(cur_text, w)}{C.RESET}"
-                    if show_above and prev_text:
-                        out.append(f"    {C.ACCENT}⌃{C.RESET} {C.DIM}{ui.truncate_text(prev_text, w - 2)}{C.RESET}")
-                    out.append(f"  ✎ {mid}")
-                    if next_text:
-                        out.append(f"    {C.ACCENT}⌄{C.RESET} {C.DIM}{ui.truncate_text(next_text, w - 2)}{C.RESET}")
-                    continue
-
-                cell_str = _render_list_edit_cell(
-                    val_str, inner - 4, row_is_editing, True, edit_buf, edit_pos,
-                    (col_types or {}).get(0) == 'timestamp',
-                    f"{C.PRIMARY}{C.BOLD}" if (is_sel and not edit_mode) else '')
-                if is_sel and not edit_mode:
-                    out.append(f"  {cursor_glyph} {C.PRIMARY}{C.BOLD}{cell_str}{C.RESET}")
-                else:
-                    out.append(f"  {cursor_glyph} {cell_str}")
-
-    # Pin the bottom separator (the box's bottom) + hint bar to the bottom of the screen.
-    if boxed:
-        out = boxed_frame([], out, message.strip().rstrip(":"),
-                          max(4, _hint_pin_target() - len(hint_lines)), not edit_mode)
-    else:
-        _filler = _hint_pin_target() - len(out) - 1 - len(hint_lines)
-        if _filler > 0:
-            out.extend([""] * _filler)
-        out.append(f"{C.DIM}{'─' * ui.get_terminal_width()}{C.RESET}")
-    out.extend(f"{' ' * ui.MARGIN_H}{h}" for h in hint_lines)
-
-    return out, viewport, vis, _LEDIT_HEADER_ROWS, active_hints, len(hint_lines)
+    grid = table_lines(headers, [shown(i) for i in range(n)], inner, cursor=cursor, mins=tuple(mins),
+                       first=viewport, count=vis)
+    body = top + [" " * ui.MARGIN_H + ln for ln in grid]
+    if not n:
+        body.append(f"   {C.DIM}No rows yet · {keys.label('table.add')} adds one{C.RESET}" if can_add
+                    else f"   {C.DIM}No rows{C.RESET}")
+    out, _dx = boxed_chrome(body, message, pairs, cells, help_key=editing is None)
+    return out, viewport, vis, 1 + len(top) + 2
 
 
 def _parse_import_rows(text: str, headers: tuple[str, ...]) -> list:
@@ -481,28 +243,29 @@ def _parse_import_rows(text: str, headers: tuple[str, ...]) -> list:
 
 
 def list_edit(message: str, initial_items: list | None = None, headers: tuple[str, ...] = ("ROLE", "NAME"),
-              fixed_rows: bool = False, locked_cols: set | None = None,
-              col_ratios: tuple | None = None, col_hints: object = None,
-              col_mins: tuple | None = None, col_types: dict | None = None) -> list | None:
-    """Arrow keys navigate, 'a' adds, 'e' edits in-place, 'd' deletes, Enter saves.
-    'i' imports rows typed in the system editor, 'f' imports them from a file.
+              fixed_rows: bool = False, locked_cols: set | None = None, col_hints: object = None,
+              col_mins: tuple | None = None, col_types: dict | None = None, note: str = "") -> list | None:
+    """A table of rows to edit: ↑↓ move, 'a' adds a row, 'e' edits the
+    highlighted one in place (Tab, Shift-Tab between its cells), 'd' deletes,
+    Enter saves; 'i' imports rows typed in the system editor, 'f' from a file.
 
-    Supports in-place cell editing with Tab navigation between columns.
-    fixed_rows: disables add/delete (rows can only be edited, not added or removed).
-    locked_cols: set of column indices that cannot be edited.
-    col_ratios: relative starting widths for the columns.
+    `message` is the box's title: what the rows are. `note`: what to put in
+    them, dim at the top of the box. fixed_rows: rows can be edited, not
+    added or removed. locked_cols: column indices that can't be edited.
     col_hints:  callable(col, row) -> candidate values for a cell. With two or
                 more, and the cell's value among them, the cell opens as a
-                barrel that cycles through them instead of free text.
-    col_mins:   per-column minimum widths, honoured before the ratios: this is
-                what keeps a fixed-shape cell readable when the table is narrow.
+                choice that ↑↓ step through instead of free text.
+    col_mins:   per-column minimum widths: what keeps a fixed-shape cell
+                readable when the table is narrow.
     col_types:  {column index: type} for cells that edit as something other than
                 free text. ``'timestamp'`` gives a split date/time field masked
                 as ``YYYY-MM-DD HH:MM:SS``: you type only the digits, and the
                 left/right arrows run past the end of one part straight into the
                 next rather than needing Tab. Leaving the time blank keeps the
                 value a plain date.
-    """
+
+    Returns the rows (Esc with changes asks whether to keep them), or None
+    when left unchanged."""
     items    = list(initial_items) if initial_items else []
     cursor   = 0
     viewport = 0
@@ -510,6 +273,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
     old      = _get_term_attrs(fd)
     w        = _Widget(fd)
     num_cols = len(headers)
+    locked   = set(locked_cols or ())
 
     edit_mode   = False
     edit_col    = 0
@@ -524,72 +288,97 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
         """True if `col` edits as a split timestamp rather than free text."""
         return (col_types or {}).get(col) == 'timestamp'
 
-    def _seed_edit(col: int, value: str) -> tuple:
-        """Opening buffer and caret for editing `col`: a mask for a timestamp
-        column, otherwise the plain text with the caret at its end."""
-        if _is_ts(col):
-            buf = _ts_buffer(value)
-            return buf, _TS_SLOTS[0]
-        buf = list(str(value))
-        return buf, len(buf)
-
-    def _get_cell_hints() -> list[str]:
-        """Candidate values for the current cell from `col_hints`, or [] if unavailable."""
-        if col_hints is None:
+    def _cell_hints(col: int) -> list[str]:
+        """Candidate values for the highlighted row's cell `col`, from `col_hints`."""
+        if col_hints is None or not items or _is_ts(col):
             return []
-        curr = items[cursor] if items else None
-        if curr is None:
-            return []
-        row = list(curr) if isinstance(curr, (list, tuple)) else [str(curr)]
         try:
-            return list(col_hints(edit_col, row))  # type: ignore[operator]
+            return [str(v) for v in col_hints(col, _row_values(items[cursor], num_cols))]  # type: ignore[operator]
         except Exception:
             return []
 
-    _le_vis: int = 2
-    _le_header_rows: int = 4
-    # Maps an absolute (row, col) on a hint line → the key clicking it replays
-    # (populated only in non-edit mode, where those hints are actionable).
-    _hint_cells: dict[tuple[int, int], str] = {}
+    def _open_cell(col: int) -> None:
+        """Start editing the highlighted row's cell `col`: a timestamp's mask,
+        a choice where the value is one of its hints, else the text."""
+        nonlocal edit_col, edit_buf, edit_pos, barrel_mode, barrel_idx, barrel_hints
+        edit_col = col
+        value = _row_values(items[cursor], num_cols)[col]
+        if _is_ts(col):
+            edit_buf, edit_pos = _ts_buffer(value), _TS_SLOTS[0]
+        else:
+            edit_buf, edit_pos = list(value), len(value)
+        barrel_hints = _cell_hints(col)
+        barrel_mode = len(barrel_hints) >= 2 and value in barrel_hints
+        barrel_idx = barrel_hints.index(value) if barrel_mode else 0
 
-    def _render():
-        nonlocal viewport, _le_vis, _le_header_rows
-        lines, new_viewport, new_vis, new_hdr, active_hints, n_hint = _build_list_edit_lines(
-            message, items, headers,
-            cursor, viewport,
-            edit_mode, edit_col, edit_buf, edit_pos,
-            fixed_rows, barrel_mode, barrel_hints, barrel_idx,
-            col_ratios, col_mins, col_types,
-        )
-        viewport = new_viewport
-        _le_vis = new_vis
-        _le_header_rows = new_hdr
-        _hint_cells.clear()
-        if n_hint:              # edit-mode hints too: a hint shown is a key that works
-            _hp = list(active_hints)
-            _start = len(lines) - n_hint
-            for _k in range(n_hint):
-                add_hint_click_cells(_hint_cells, lines[_start + _k],
-                                     1 + ui.top_margin() + (_start + _k), _hp)
-        if lines and box_fits():  # the box's border carries the toggle; `?` is typed while editing
-            place_help_toggle(lines, 1 + ui.top_margin(), _hint_cells, help_key=not edit_mode)
-        elif lines:
-            lines[0] = add_help_corner(lines[0], 1 + ui.top_margin(), _hint_cells, help_key=not edit_mode)
-        w.render(lines)
+    def _next_col(step: int) -> int:
+        """The next unlocked column from the one being edited, either way."""
+        col = edit_col
+        for _ in range(num_cols):
+            col = (col + step) % num_cols
+            if col not in locked:
+                return col
+        return edit_col
 
-    def _commit_edit_buffer():
-        """Write the in-progress edit buffer back into the current row, padding short rows to num_cols."""
-        val = _ts_value(edit_buf) if _is_ts(edit_col) else "".join(edit_buf)
+    def _commit() -> None:
+        """Write the cell being edited back into its row."""
+        if barrel_mode and barrel_hints:
+            val = barrel_hints[barrel_idx]
+        else:
+            val = _ts_value(edit_buf) if _is_ts(edit_col) else "".join(edit_buf)
         if num_cols > 1:
-            curr = list(items[cursor]) if isinstance(items[cursor], (list, tuple)) else [str(items[cursor])]
-            while len(curr) < num_cols: curr.append("")
-            curr[edit_col] = val
-            items[cursor] = tuple(curr)
+            row = _row_values(items[cursor], num_cols)
+            row[edit_col] = val
+            items[cursor] = tuple(row)
         else:
             items[cursor] = val
 
+    def _editing() -> tuple | None:
+        """The cell under edit as (column, its segments), or None."""
+        if not edit_mode:
+            return None
+        if barrel_mode:
+            return edit_col, edit_segments(barrel_hints[barrel_idx], 0, cycling=True)
+        if _is_ts(edit_col):
+            return edit_col, _ts_segments(edit_buf, edit_pos)
+        return edit_col, edit_segments("".join(edit_buf), edit_pos)
+
+    def _pairs() -> list:
+        L = keys.label
+        if edit_mode:
+            if barrel_mode:
+                pairs = [("↑↓", "choose"), ("tab/⇧tab", "cell")]
+            elif _is_ts(edit_col):
+                pairs = [("←→", "move"), ("tab/⇧tab", "cell")]
+            else:
+                pairs = [("tab/⇧tab", "cell")]
+            return pairs + [("↵", "set"), ("esc", "cancel")]
+        pairs = [(L("list.up", "list.down"), "move")]
+        if not fixed_rows:
+            pairs.append((L("table.add"), "add"))
+        pairs.append((L("table.edit"), "edit"))
+        if not fixed_rows:
+            pairs += [(L("table.delete", most=1), "delete"), move_hint()]
+        pairs += [(L("table.import_text"), "import text"), (L("table.import_file"), "from file"),
+                  (L("list.choose", most=1), "save"), (L("list.back", most=1), "back"),
+                  (L("list.quit"), "quit app")]
+        if chrome._value_toggle_enabled:
+            pairs.append((L("global.raw_text"), "raw text"))
+        return pairs
+
+    _vis = 1
+    _first_line = 1
+    _hint_cells: dict[tuple[int, int], str] = {}
+
+    def _render():
+        nonlocal viewport, _vis, _first_line
+        lines, viewport, _vis, _first_line = _build_list_edit_lines(
+            message, items, headers, cursor, viewport, _editing(), _pairs(), _hint_cells,
+            note, col_mins, col_types, can_add=not fixed_rows)
+        w.render(lines)
+
     result = None
-    _le_last_click: int | None = None
+    _last_click: int | None = None
     try:
         _set_raw(fd)
         enable_mouse()
@@ -600,7 +389,7 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
             if ui.consume_resize():
                 ui.clear_screen()
                 w.anchor_reset()
-                _le_last_click = None
+                _last_click = None
                 _render()
                 continue
 
@@ -623,358 +412,138 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
             if chrome.is_mode_toggle(key) and not edit_mode:
                 return MODE_TOGGLE  # type: ignore[return-value]
 
-            if edit_mode and barrel_mode:
+            if edit_mode:
                 if key == 'ESC':
                     items[cursor] = edit_backup
                     edit_mode = False
-                    barrel_mode = False
-                    _render()
-
-                elif key == 'UP' and barrel_hints:
-                    barrel_idx = (barrel_idx - 1) % len(barrel_hints)
-                    _render()
-
-                elif key == 'DOWN' and barrel_hints:
-                    barrel_idx = (barrel_idx + 1) % len(barrel_hints)
-                    _render()
-
                 elif key == 'ENTER':
-                    if barrel_hints:
-                        edit_buf = list(barrel_hints[barrel_idx])
-                        edit_pos = len(edit_buf)
-                    _commit_edit_buffer()
-                    barrel_mode = False
+                    _commit()
                     edit_mode = False
-                    _render()
-
-                elif key in ('TAB', 'BACKTAB') and num_cols > 1:
-                    if barrel_hints:
-                        edit_buf = list(barrel_hints[barrel_idx])
-                        edit_pos = len(edit_buf)
-                    _commit_edit_buffer()
-                    barrel_mode = False
-                    _step = -1 if key == 'BACKTAB' else 1
-                    next_col = (edit_col + _step) % num_cols
-                    if locked_cols:
-                        steps = 0
-                        while next_col in locked_cols and steps < num_cols:
-                            next_col = (next_col + _step) % num_cols
-                            steps += 1
-                    edit_col = next_col
-                    curr = items[cursor]
-                    i_vals = list(curr) if isinstance(curr, (list, tuple)) else [str(curr)]
-                    while len(i_vals) < num_cols: i_vals.append("")
-                    edit_buf, edit_pos = _seed_edit(edit_col, str(i_vals[edit_col]))
-                    barrel_hints = [] if _is_ts(edit_col) else _get_cell_hints()
-                    cur_val = "".join(edit_buf)
-                    if len(barrel_hints) >= 2 and cur_val in barrel_hints:
-                        barrel_mode = True
-                        barrel_idx = barrel_hints.index(cur_val)
-                    else:
-                        barrel_mode = False
-                        barrel_idx = 0
-                    _render()
-
-                elif len(key) == 1 and key.isprintable():
-                    # Exit barrel → free-text mode, seed buffer with this char
-                    barrel_mode = False
-                    edit_buf = [key]
-                    edit_pos = 1
-                    _render()
-
-            elif edit_mode and _is_ts(edit_col):
-                # Split timestamp cell: only digits go in, and the caret walks the
-                # whole mask so running off the end of one part lands in the next.
-                if key == 'ESC':
-                    items[cursor] = edit_backup
-                    edit_mode = False
-                    _render()
-
-                elif key == 'ENTER':
-                    _commit_edit_buffer()
-                    edit_mode = False
-                    _render()
-
-                elif key in ('TAB', 'BACKTAB') and num_cols > 1:
-                    _commit_edit_buffer()
-                    _step = -1 if key == 'BACKTAB' else 1
-                    next_col = (edit_col + _step) % num_cols
-                    if locked_cols:
-                        steps = 0
-                        while next_col in locked_cols and steps < num_cols:
-                            next_col = (next_col + _step) % num_cols
-                            steps += 1
-                    edit_col = next_col
-                    curr = items[cursor]
-                    i_vals = list(curr) if isinstance(curr, (list, tuple)) else [str(curr)]
-                    while len(i_vals) < num_cols: i_vals.append("")
-                    edit_buf, edit_pos = _seed_edit(edit_col, str(i_vals[edit_col]))
-                    barrel_hints = [] if _is_ts(edit_col) else _get_cell_hints()
-                    cur_val = "".join(edit_buf)
-                    if len(barrel_hints) >= 2 and cur_val in barrel_hints:
-                        barrel_mode = True
-                        barrel_idx = barrel_hints.index(cur_val)
-                    else:
-                        barrel_mode = False
-                        barrel_idx = 0
-                    _render()
-
-                elif key == 'LEFT':
-                    edit_pos = _ts_step(edit_pos, -1)
-                    _render()
-
-                elif key == 'RIGHT':
-                    edit_pos = _ts_step(edit_pos, 1)
-                    _render()
-
-                elif key == 'HOME':
-                    edit_pos = _TS_SLOTS[0]
-                    _render()
-
-                elif key == 'END':
-                    edit_pos = _TS_SLOTS[-1]
-                    _render()
-
-                elif key == 'BACKSPACE':
-                    # Clear the slot behind the caret and sit on it, so holding
-                    # backspace rubs the stamp out right-to-left.
-                    prev = _ts_step(edit_pos, -1)
-                    if prev != edit_pos or edit_pos == _TS_SLOTS[0]:
-                        target = prev if prev != edit_pos else edit_pos
-                        edit_buf[target] = _TS_MASK[target]
-                        edit_pos = target
-                    _render()
-
-                elif key == 'DELETE':
-                    edit_buf[edit_pos] = _TS_MASK[edit_pos]
-                    _render()
-
-                elif len(key) == 1 and key.isdigit():
-                    edit_buf[edit_pos] = key
-                    nxt = _ts_step(edit_pos, 1)
-                    edit_pos = nxt if nxt != edit_pos else edit_pos
-                    _render()
-
-                # Anything else (letters, punctuation) is simply not accepted:
-                # the mask supplies every separator already.
-
-            elif edit_mode:
-                if key == 'ESC':
-                    items[cursor] = edit_backup
-                    edit_mode = False
-                    _render()
-
-                elif key == 'ENTER':
-                    _commit_edit_buffer()
-                    edit_mode = False
-                    _render()
-
                 elif key in ('TAB', 'BACKTAB'):
                     if num_cols > 1:
-                        _commit_edit_buffer()
-                        _step = -1 if key == 'BACKTAB' else 1
-                        next_col = (edit_col + _step) % num_cols
-                        # Skip locked columns when tabbing (either direction).
-                        if locked_cols:
-                            steps = 0
-                            while next_col in locked_cols and steps < num_cols:
-                                next_col = (next_col + _step) % num_cols
-                                steps += 1
-                        edit_col = next_col
-
-                        curr = items[cursor]
-                        i_vals = list(curr) if isinstance(curr, (list, tuple)) else [str(curr)]
-                        while len(i_vals) < num_cols: i_vals.append("")
-
-                        edit_buf, edit_pos = _seed_edit(edit_col, str(i_vals[edit_col]))
-                        barrel_hints = [] if _is_ts(edit_col) else _get_cell_hints()
-                        cur_val = "".join(edit_buf)
-                        if len(barrel_hints) >= 2 and cur_val in barrel_hints:
-                            barrel_mode = True
-                            barrel_idx = barrel_hints.index(cur_val)
-                        else:
-                            barrel_mode = False
-                            barrel_idx = 0
-                        _render()
-
+                        _commit()
+                        _open_cell(_next_col(-1 if key == 'BACKTAB' else 1))
+                elif barrel_mode:
+                    if key in ('UP', 'DOWN'):
+                        barrel_idx = (barrel_idx + (-1 if key == 'UP' else 1)) % len(barrel_hints)
+                    elif len(key) == 1 and key.isprintable():
+                        barrel_mode = False                  # typing: the cell's a text field again
+                        edit_buf, edit_pos = [key], 1
+                elif _is_ts(edit_col):
+                    # Only digits go in, and the caret walks the whole mask, so
+                    # running off the end of one part lands in the next. Anything
+                    # else isn't taken: the mask has every separator already.
+                    if key in ('LEFT', 'RIGHT'):
+                        edit_pos = _ts_step(edit_pos, -1 if key == 'LEFT' else 1)
+                    elif key in ('HOME', 'END'):
+                        edit_pos = _TS_SLOTS[0 if key == 'HOME' else -1]
+                    elif key == 'BACKSPACE':
+                        # Clear the slot behind the caret and sit on it, so holding
+                        # backspace rubs the stamp out right to left.
+                        prev = _ts_step(edit_pos, -1)
+                        edit_buf[prev] = _TS_MASK[prev]
+                        edit_pos = prev
+                    elif key == 'DELETE':
+                        edit_buf[edit_pos] = _TS_MASK[edit_pos]
+                    elif len(key) == 1 and key.isdigit():
+                        edit_buf[edit_pos] = key
+                        edit_pos = _ts_step(edit_pos, 1)
                 elif key == 'BACKSPACE' and edit_pos == 0 and len(barrel_hints) >= 2:
-                    barrel_mode = True
-                    barrel_idx = 0
-                    _render()
-
+                    barrel_mode, barrel_idx = True, 0      # back to the choices
                 elif (new_pos := edit_line(edit_buf, edit_pos, key)) is not None:
                     edit_pos = new_pos
-                    _render()
+                _render()
+                continue
 
+            if key.startswith('MOUSE_CLICK:'):
+                # Now-playing box / hint-glyph clicks first; a plain row click
+                # falls through to the row-selection handler below.
+                _mp = key.split(':')
+                _mr = int(_mp[2]); _mc = int(_mp[3]) if len(_mp) > 3 else 1
+                _act = footer_click_action(_mr, _mc)
+                if _act == 'open' and chrome._player_opener is not None:
+                    chrome._player_opener()
+                    enable_mouse()
+                    sys.stdout.flush()
+                    w.anchor_reset(); _last_click = None; _render(); continue
+                if _act in FOOTER_ACTIONS and chrome._transport_handler is not None:
+                    chrome._transport_handler(_act); continue
+
+            act = keys.action(key, "table")
+            if key == 'CTRL_C':
+                break
+            elif key in ('SCROLL_UP', 'SCROLL_DOWN') or act in ('list.up', 'list.down'):
+                if items:
+                    cursor = (cursor + (-1 if key == 'SCROLL_UP' or act == 'list.up' else 1)) % len(items)
+                _last_click = None
+            elif key.startswith('MOUSE_CLICK:'):
+                _parts = key.split(':')
+                offset = int(_parts[2]) - 1 - ui.top_margin() - _first_line
+                if int(_parts[1]) == 0 and 0 <= offset < _vis and viewport + offset < len(items):
+                    cursor = viewport + offset
+                    if _last_click == cursor:            # a second click on the row: save
+                        result = items
+                        break
+                    _last_click = cursor
+            elif act == 'table.add' and not fixed_rows:
+                items.append(tuple("" for _ in range(num_cols)) if num_cols > 1 else "")
+                cursor = len(items) - 1
+                edit_backup = items[cursor]
+                if len(locked) < num_cols:
+                    edit_mode = True
+                    _open_cell(next(c for c in range(num_cols) if c not in locked))
+            elif act == 'table.edit' and items and len(locked) < num_cols:
+                edit_backup = items[cursor]
+                edit_mode = True
+                _open_cell(next(c for c in range(num_cols) if c not in locked))
+            elif act == 'table.delete' and items and not fixed_rows:
+                items.pop(cursor)
+                cursor = min(cursor, max(0, len(items) - 1))
+            elif keys.pressed(key, "list.move_up") and not fixed_rows and cursor > 0:
+                items[cursor - 1], items[cursor] = items[cursor], items[cursor - 1]
+                cursor -= 1
+                _last_click = None
+            elif keys.pressed(key, "list.move_down") and not fixed_rows and cursor < len(items) - 1:
+                items[cursor + 1], items[cursor] = items[cursor], items[cursor + 1]
+                cursor += 1
+                _last_click = None
+            elif act == 'list.choose':
+                result = items
+                break
+            elif act in ('table.import_text', 'table.import_file'):
+                _restore_term_attrs(fd, old)
+                if act == 'table.import_text':
+                    template = ("# One entry per line: " + " : ".join(h.lower() for h in headers)
+                                + "\n# Example:\n" + " : ".join(h.lower() for h in headers) + "\n"
+                                if num_cols > 1 else "# One entry per line\n")
+                    text_input = multiline(message, template)
+                else:
+                    file_path = path("Import from file:")      # with completion; the format is worked out
+                    text_input = None
+                    if file_path:
+                        try:
+                            with open(os.path.expanduser(file_path), encoding='utf-8') as _fp:
+                                text_input = _fp.read()
+                        except OSError:
+                            ui.show_error(f"couldn't read {file_path}")
+                _set_raw(fd)
+                enable_mouse()   # re-arm mouse
+                screen_takeover_next()   # paint over the previous screen, no flash
+                w.anchor_reset()
+                if text_input:
+                    items.extend(_parse_import_rows(text_input, headers))
+                    cursor = len(items) - 1 if items else 0
+            elif act == 'list.quit':
+                raise QuitToTerminal()   # q quits the app; never a way out of a widget
+            elif act == 'list.back':
+                if [_row_values(r, num_cols) for r in items] == [_row_values(r, num_cols) for r in initial_items or []]:
+                    break                                # nothing changed: nothing to ask
+                # "Discard changes?" → yes = drop the edits, no = keep them.
+                result = None if confirm("Discard changes?", default=False) else items
+                break
             else:
-                if key.startswith('MOUSE_CLICK:'):
-                    # Now-playing box / hint-glyph clicks first; a plain row click
-                    # falls through to the row-selection handler below.
-                    _mp = key.split(':')
-                    _mr = int(_mp[2]); _mc = int(_mp[3]) if len(_mp) > 3 else 1
-                    _act = footer_click_action(_mr, _mc)
-                    if _act == 'open' and chrome._player_opener is not None:
-                        chrome._player_opener()
-                        enable_mouse()
-                        sys.stdout.flush()
-                        w.anchor_reset(); _le_last_click = None; _render(); continue
-                    if _act in FOOTER_ACTIONS and chrome._transport_handler is not None:
-                        chrome._transport_handler(_act); continue
-                    _hk = _hint_cells.get((_mr, _mc))
-                    if _hk is not None:
-                        key = _hk        # replay the hint's key through the switch
-
-                act = keys.action(key, "table")
-                if key == 'CTRL_C':
-                    break
-                elif key == 'SCROLL_UP':
-                    if items: cursor = (cursor - 1) % len(items)
-                    _le_last_click = None
-                    _render()
-                elif key == 'SCROLL_DOWN':
-                    if items: cursor = (cursor + 1) % len(items)
-                    _le_last_click = None
-                    _render()
-                elif key.startswith('MOUSE_CLICK:'):
-                    _parts = key.split(':')
-                    _btn, _mrow = int(_parts[1]), int(_parts[2])
-                    if _btn == 0 and items:
-                        # render() prepends top_margin() blank rows before lines[0]
-                        _line_idx   = _mrow - 1 - ui.top_margin()
-                        _item_offset = _line_idx - _le_header_rows
-                        if 0 <= _item_offset < _le_vis:
-                            _clicked_idx = viewport + _item_offset
-                            if 0 <= _clicked_idx < len(items):
-                                if _le_last_click == _clicked_idx:
-                                    cursor = _clicked_idx
-                                    result = items
-                                    break
-                                else:
-                                    _le_last_click = _clicked_idx
-                                    cursor = _clicked_idx
-                                    _render()
-                elif act == 'list.up':
-                    if items: cursor = (cursor - 1) % len(items)
-                    _le_last_click = None
-                    _render()
-                elif act == 'list.down':
-                    if items: cursor = (cursor + 1) % len(items)
-                    _le_last_click = None
-                    _render()
-
-                elif act == 'table.add' and not fixed_rows:
-                    empty_item = tuple(["" for _ in range(num_cols)]) if num_cols > 1 else ""
-                    items.append(empty_item)
-                    cursor = len(items) - 1
-
-                    edit_mode = True
-                    edit_col = 0
-                    edit_buf = []
-                    edit_pos = 0
-                    edit_backup = empty_item
-                    _render()
-
-                elif act == 'table.edit' and items:
-                    edit_mode = True
-                    # Start on the first non-locked column.
-                    edit_col = 0
-                    if locked_cols:
-                        while edit_col < num_cols and edit_col in locked_cols:
-                            edit_col += 1
-                        if edit_col >= num_cols:
-                            edit_col = 0  # all cols locked: allow no editing
-                    edit_backup = items[cursor]
-
-                    if num_cols > 1:
-                        curr = items[cursor]
-                        i_vals = list(curr) if isinstance(curr, (list, tuple)) else [str(curr)]
-                        while len(i_vals) < num_cols: i_vals.append("")
-                        edit_buf, edit_pos = _seed_edit(edit_col, str(i_vals[edit_col]))
-                    else:
-                        edit_buf = list(str(items[cursor]))
-                        edit_pos = len(edit_buf)
-
-                    barrel_hints = [] if _is_ts(edit_col) else _get_cell_hints()
-                    cur_val = "".join(edit_buf)
-                    if len(barrel_hints) >= 2 and cur_val in barrel_hints:
-                        barrel_mode = True
-                        barrel_idx = barrel_hints.index(cur_val)
-                    else:
-                        barrel_mode = False
-                        barrel_idx = 0
-                    _render()
-
-                elif act == 'table.delete' and items and not fixed_rows:
-                    items.pop(cursor)
-                    if items:
-                        cursor = min(cursor, len(items) - 1)
-                    else:
-                        cursor = 0
-                    _render()
-
-                elif keys.pressed(key, "list.move_up") and items and not fixed_rows and cursor > 0:
-                    items[cursor - 1], items[cursor] = items[cursor], items[cursor - 1]
-                    cursor -= 1
-                    _le_last_click = None
-                    _render()
-
-                elif keys.pressed(key, "list.move_down") and items and not fixed_rows and cursor < len(items) - 1:
-                    items[cursor + 1], items[cursor] = items[cursor], items[cursor + 1]
-                    cursor += 1
-                    _le_last_click = None
-                    _render()
-
-                elif act == 'list.choose':
-                    result = items
-                    break
-
-                elif act in ('table.import_text', 'table.import_file'):
-                    if act == 'table.import_text':
-                        if num_cols > 1:
-                            template = (
-                                "# One entry per line: "
-                                + " : ".join(h.lower() for h in headers)
-                                + "\n# Example:\n"
-                                + " : ".join(h.lower() for h in headers)
-                                + "\n"
-                            )
-                        else:
-                            template = "# One entry per line\n"
-                        _restore_term_attrs(fd, old)
-                        text_input = multiline(message, template)
-                        _set_raw(fd)
-                    else:
-                        # Path prompt (with completion), then auto-detect the format.
-                        # Clear to a fresh screen first: path() renders inline from
-                        # the cursor, so without this it draws over the list and spills.
-                        _restore_term_attrs(fd, old)
-                        ui.clear_screen()
-                        file_path = path("Import from file:")
-                        _set_raw(fd)
-                        text_input = None
-                        if file_path:
-                            try:
-                                with open(os.path.expanduser(file_path), encoding='utf-8') as _fp:
-                                    text_input = _fp.read()
-                            except OSError:
-                                ui.show_error(f"couldn't read {file_path}")
-                                text_input = None
-                    enable_mouse()   # re-arm mouse
-                    screen_takeover_next()   # paint over the previous screen, no flash
-                    w.anchor_reset()
-                    if text_input:
-                        items.extend(_parse_import_rows(text_input, headers))
-                        cursor = len(items) - 1 if items else 0
-                    _render()
-
-                elif act == 'list.quit':
-                    raise QuitToTerminal()   # q quits the app; never a way out of a widget
-
-                elif act == 'list.back':
-                    ui.clear_screen()
-                    # "Discard changes?" → yes = drop edits (original), no = keep edits.
-                    result = initial_items if confirm("Discard changes?", default=False) else items
-                    break
+                continue
+            _render()
 
     finally:
         disable_mouse()

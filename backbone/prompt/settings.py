@@ -1,6 +1,6 @@
 """What every back* Settings screen is built from: the two-column row (name,
 then its state), the on/off glyphs and space to flip them, a pick from fixed
-values, and the accent colour picker."""
+values, and the theme picker."""
 from __future__ import annotations
 
 from backbone import ui
@@ -51,62 +51,78 @@ def pick_option(question: str, options: dict, current, title: str):
                   header=PanelTitle(title))
 
 
-def accent_swatch(value) -> list:
-    """A block of the colour itself, or a hatched gap when there is none."""
-    code = ui.accent_code(value)
-    return [(f"{code}████{C.RESET}", 'normal')] if code else [("░░░░", 'dim')]
+def theme_sample(name: str, overrides: dict | None = None) -> list:
+    """The theme `name` (with `overrides`, as set_theme takes them) in
+    miniature, as it looks whatever theme is on now: on its own background,
+    between its borders, a title, its text, its secondary text and a minor
+    title, the cursor, and a line on its highlight band."""
+    if not C.RESET:                                   # colour is off
+        return ["│Aa Aa Aa Aa › Aa │"]
+    c, bg, text = ui.theme_codes(name, overrides), ui.theme_background(name), ui.theme_text(name)
+    on = lambda back, code, s: f"{C.RESET}{back}{text}{code}{s}"          # noqa: E731  (a weight alone: on its text)
+    return [(on(bg, c['FRAME'], "│") + on(bg, c['ACCENT2'], "Aa ") + on(bg, "", "Aa ") + on(bg, c['DIM'], "Aa ")
+             + on(bg, c['HEADING'], "Aa ") + on(bg, c['ACCENT'], "›") + on(bg + c['BAR'], "", " Aa ")
+             + on(bg, c['FRAME'], "│") + C.RESET, 'normal')]
 
 
-def accent_name(value, name: str):
-    """The colour's name, written in that colour."""
-    code = ui.accent_code(value)
-    return [(f"{code}{name}{C.RESET}", 'normal')] if code else name
+def theme_name(name: str, label: str, overrides: dict | None = None):
+    """The theme's name, written in its own accent."""
+    return [(f"{ui.theme_codes(name, overrides)['ACCENT']}{label}{C.RESET}", 'normal')] if C.RESET else label
 
 
-ACCENT_COLUMNS = [
-    Column(style='normal'),                  # swatch
-    Column(style='normal'),                  # name, in its own colour
+THEME_COLUMNS = [
+    Column(style='normal'),                  # name, in its own accent
+    Column(style='normal'),                  # its colours
     Column(style='dynamic-dim', flex=True),  # ● on the one in use
 ]
 
 
-def pick_accent(title: str, current, on_pick) -> None:
-    """An accent colour picker: every colour shown in itself, the terminal's
-    own first, then fixed ones and a custom #RRGGBB. Picking one calls
-    `on_pick(value)`, which applies it, so the screen around the list is the
+def pick_terminal_accent(title: str, current: str, on_pick) -> None:
+    """One of Terminal's accents, from the terminal's own colours
+    (ui.TERMINAL_ACCENTS), each written in itself. Picking one calls
+    `on_pick(name)`, which applies it, so the screen around the list is the
     preview; it returns when backed out of."""
     from backbone.prompt.lists import ListPlace, select
-    from backbone.prompt.text import text
     place = ListPlace()
-    place.value = '__custom__' if str(current).startswith('#') else current
+    place.value = current
     while True:
-        custom = current if str(current).startswith('#') else None
-
-        def _row(value, name: str, colour) -> Choice:
-            in_use = value == current or (value == '__custom__' and custom)
-            return Choice(title=name, value=value,
-                          cells=[accent_swatch(colour), accent_name(colour, name), ON_GLYPH if in_use else ""])
-
-        choices: list = [separator("Your terminal's colours")]
-        for i, (key, name, _colour) in enumerate(ui.ACCENT_PRESETS):
-            if i == 6:
-                choices.append(separator("Fixed colours"))
-            choices.append(_row(key, name, key))
-        choices += [separator(), _row('__custom__', 'Custom colour…', custom)]
-
-        choice = select("", choices=choices, columns=ACCENT_COLUMNS, place=place,
-                        header=PanelTitle(title, ui.accent_label(current)))
+        choices = [Choice(title=label, value=name,
+                          cells=[[(f"{code}{label}{C.RESET}", 'normal')] if C.RESET else label,
+                                 ON_GLYPH if name == current else ""])
+                   for name, (label, code) in ui.TERMINAL_ACCENTS.items()]
+        choice = select("", choices=choices, columns=SETTINGS_COLUMNS, place=place,
+                        header=PanelTitle(title, ui.TERMINAL_ACCENTS.get(current, ("",))[0]))
         if not choice:
             return
-        if choice == '__custom__':
-            typed = text("Hex colour:", default=custom or "", placeholder="#4FC3F7")
-            if typed is None:
-                continue
-            rgb = ui.parse_hex_colour(typed)
-            if rgb is None:
-                ui.show_status("That isn't a colour. Use #RRGGBB, like #4FC3F7.")
-                continue
-            choice = "#%02X%02X%02X" % rgb
         current = choice
         on_pick(choice)
-        ui.show_status(f"{title}: {ui.accent_label(choice)}")
+        ui.show_status(f"{title}: {ui.TERMINAL_ACCENTS[choice][0]}")
+
+
+def pick_theme(current: str, on_pick, extra: dict | None = None) -> None:
+    """The theme picker: every theme in ui.THEMES, and `extra`, a host's own
+    as {name: (label, overrides)}: Terminal with those colours over it (see
+    set_theme; or a callable giving them), each by name in its own colours. Picking one calls
+    `on_pick(name)`, which applies it, so the screen around the list is the
+    preview; it returns when backed out of."""
+    from backbone.prompt.lists import ListPlace, select
+    themes = {**{name: (label, None) for name, label in ui.THEMES.items()}, **(extra or {})}
+    place = ListPlace()
+    place.value = current
+    while True:
+        # A host theme's colours can be a callable, worked out each time the
+        # list is drawn: Album art's change with the track, list open or not.
+        live = lambda over: over() if callable(over) else over                  # noqa: E731
+        choices = [Choice(title=label, value=name,
+                          cells=[lambda n=name, l=label, o=over: theme_name(n, l, live(o)),
+                                 lambda n=name, o=over: theme_sample(n, live(o)),
+                                 ON_GLYPH if name == current else ""])
+                   for name, (label, over) in themes.items()]
+        note = " · this terminal keeps its own background" if ui.full_themes_supported() is False else ""
+        choice = select("", choices=choices, columns=THEME_COLUMNS, place=place,
+                        header=PanelTitle("Theme", themes.get(current, ("",))[0] + note))
+        if not choice:
+            return
+        current = choice
+        on_pick(choice)
+        ui.show_status(f"Theme: {themes[choice][0]}")

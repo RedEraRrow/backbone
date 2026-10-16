@@ -1,6 +1,7 @@
 """What every prompt widget shares: the hint bar and help corner, the global
 player and transport keys, mouse reporting, and the per-edit raw-text toggle."""
 from __future__ import annotations
+import functools
 import sys
 from backbone.prompt.core import (
     box_fits, boxed_frame, render_status_bar, C,
@@ -190,7 +191,7 @@ def append_chrome(out: list, pairs, cells: dict, *, extra: str = "",
 
 def inner_rule() -> str:
     """A divider across the inside of a widget's box (boxed_chrome)."""
-    return f"  {C.DIM}{'─' * max(1, ui.get_terminal_width() - 2 * ui.MARGIN_H - 4)}{C.RESET}"
+    return f"  {C.FRAME}{'─' * max(1, ui.get_terminal_width() - 2 * ui.MARGIN_H - 4)}{C.RESET}"
 
 
 def boxed_chrome(body: list, title: str, pairs, cells: dict, *, extra: str = "",
@@ -321,6 +322,7 @@ def set_activity_opener(fn) -> None:
     _activity_opener = fn
 
 
+@functools.lru_cache(maxsize=4096)
 def _plain(s: str) -> str:
     """The row's printed characters, one entry per *terminal column*.
 

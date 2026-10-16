@@ -4,17 +4,19 @@ from __future__ import annotations
 import re
 import sys
 import textwrap
+import threading
 import time
 from typing import Any, Callable, Literal, overload
 from backbone.prompt.core import (
     _COLUMNS_MAX_WIDTH, _EDGE_MARGIN, _get_term_attrs, _set_raw, _restore_term_attrs,
-    _wait_for_keypress, _table_widths, _render_table_row, _clip_ansi, _norm, block_cursor,
+    _wait_for_keypress, _table_widths, _render_table_row, _cell_text, span_width, edit_segments, _clip_ansi, _norm, block_cursor,
     _read_key, _visible_rows, _cols, _Widget, _hint_pin_target, screen_takeover_next, screen_backdrop,
     Choice, Column, JumpTo, PanelTitle, Trail, border_right, box_fits, box_lines, boxed_frame, column_widths,
     COL_GAP, _COL_MAIN_MIN, _COL_PREVIEW, _LIST_ROWS_MIN, _SHAPE_SAMPLE, _STRIP_SPLIT, strip_rows,
     columns_shown, help_corner_text, panel_header, rounded_header, set_columns_shown, trail_lines,
 )
 from backbone import keys, ui
+from backbone.log import quietly
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import (
@@ -111,6 +113,9 @@ keys.define("confirm", "Yes/no questions", [
     ("back", ("ESC",), "back, answering no"),
 ])
 L = keys.label
+
+
+_NOTHING = object()                   # no value: not even None
 
 
 def _scroll(viewport: int, cursor: int, vis: int, items: list) -> int:
@@ -491,9 +496,9 @@ def _select_flat(message: str, choices: list, *,
     _col_geo: list = [None]  # the column browser's last layout, for clicks (see _lines)
     _scrolling = [False]          # the highlighted row is cut off and scrolls: redraw it as it moves
     _scrolled_at = [0.0]
-    # Maps a visible item index → its ANSI-stripped rendered text, so a mouse
-    # click can tell whether it landed on a printed character or blank space.
-    _row_plain: dict[int, str] = {}
+    # Maps a visible item index → its rendered line, so a mouse click can
+    # tell whether it landed on a printed character or blank space.
+    _row_line: dict[int, str] = {}
     # Maps an absolute (row, col) on a hint line → the key that clicking that
     # bright glyph should replay through the normal key handling below.
     _hint_cells: dict[tuple[int, int], str] = {}
@@ -518,18 +523,47 @@ def _select_flat(message: str, choices: list, *,
         the length of its text, so escape codes inside one would be counted as
         visible and the cell truncated to nothing."""
         if not _editing_text():
-            # ▾ marks a value being stepped through rather than one already set.
-            return [("▾ ", 'accent'), (_edit_opts[_edit_i], 'primary')]
-        text = "".join(_edit_buf)
-        head = [("✎ ", 'accent')]
-        if _edit_pos >= len(text):
-            return head + [(text, 'primary'), (" ", 'cursor')]
-        return head + [(text[:_edit_pos], 'primary'), (text[_edit_pos], 'cursor'),
-                       (text[_edit_pos + 1:], 'primary')]
+            return edit_segments(_edit_opts[_edit_i], 0, cycling=True)
+        return edit_segments("".join(_edit_buf), _edit_pos)
 
     def _details(pv, width: int, height: int) -> list:
-        """The preview's details drawn `width` × at most `height`."""
-        return pv.details(width, height) if pv.details is not None and height > 0 and width > 0 else []
+        """The preview's details drawn `width` × at most `height`; then the
+        rows either side made ready in the background (_warm_around)."""
+        if pv.details is None or height <= 0 or width <= 0:
+            return []
+        out = pv.details(width, height)
+        _warm_around(width, height)
+        return out
+
+    _warm: dict = {'want': None, 'thread': None}
+
+    def _warm_around(width: int, height: int) -> None:
+        """Have the rows next to the cursor's previews drawn, at this size, on
+        a background thread: whatever they're slow to make (a picture decoded)
+        is then kept by whoever makes it, and moving onto them is instant.
+        Only the latest cursor's neighbours are worked on."""
+        near = (cursor + 1, cursor - 1, cursor + 2, cursor - 2)
+        _warm['want'] = ([items[i].value for i in near if 0 <= i < len(items) and not items[i].disabled],
+                         width, height)
+        if _warm['thread'] is None or not _warm['thread'].is_alive():
+            _warm['thread'] = threading.Thread(target=_warm_worker, daemon=True)
+            _warm['thread'].start()
+
+    def _warm_worker() -> None:
+        done: list = []
+        while True:
+            want = _warm['want']
+            values, width, height = want
+            todo = next((v for v in values if (v, width, height) not in done), _NOTHING)
+            if todo is _NOTHING:
+                if _warm['want'] is want:
+                    return
+                continue
+            done.append((todo, width, height))
+            with quietly():
+                pv = preview(todo)
+                if pv is not None and pv.details is not None:
+                    pv.details(width, height)
 
     def _place_pictures(lines, line0: int, col0: int) -> None:
         """Put `lines`' pictures on screen: lines[k] on out[line0 + k] (render()
@@ -549,7 +583,7 @@ def _select_flat(message: str, choices: list, *,
             step = max(1, len(live) // _SHAPE_SAMPLE)    # ponytail: a sample of a huge list, not all of it
             sample = live[::step]
             pvs = [p for p in (preview(it.value) for it in sample) if p is not None] if preview else []
-            wide = max((sum(ui.visual_len(str(c)) for c in it.cells) + COL_GAP * (len(it.cells) - 1)
+            wide = max((sum(ui.visual_len(_cell_text(c)[0]) for c in it.cells if c is not None) + COL_GAP * (len(it.cells) - 1)
                         if it.cells else ui.visual_len(ui.strip_ansi(str(it.title))) for it in sample), default=0)
             _shape[0] = (max((p.want for p in pvs), default=0), max((len(p.contents) for p in pvs), default=0), wide)
         return _shape[0]
@@ -624,7 +658,7 @@ def _select_flat(message: str, choices: list, *,
         dropped), the levels' rows from the top of the box (`lead` lines down:
         the message), not moved by the list's "N above".
         Records where each column landed (_col_geo), for clicks."""
-        sep = f" {C.DIM}│{C.RESET} "
+        sep = f" {C.FRAME}│{C.RESET} "
         x = 1 + ui.MARGIN_H + 2                  # the screen column inside "│ "
         trails, columns = [], []
         for t, tw in shown:
@@ -665,7 +699,7 @@ def _select_flat(message: str, choices: list, *,
         # otherwise a just-appeared box paints over the pinned hints until the
         # next redraw (hints missing until you click/navigate).
         ui.footer_lines(ui.get_terminal_width())
-        _row_plain.clear()
+        _row_line.clear()
 
         max_header_w = 0
         for hl in h_lines:
@@ -753,13 +787,18 @@ def _select_flat(message: str, choices: list, *,
             first) moving through its text when it's cut off."""
             cells = items[i].cells
             at = next((k for k, c in enumerate(columns or []) if c.scroll), 0)
+            while cells and 0 < at < len(cells) and cells[at] is None:
+                at -= 1                              # merged: the cell spanning it scrolls
             if _edit_on and i == cursor and cells and 0 <= row_edit_col < len(cells):
                 cells = list(cells)
                 cells[row_edit_col] = _edit_cell()
             elif i == cursor and cells and len(col_widths) > at and len(cells) > at \
-                    and isinstance(cells[at], str) and ui.visual_len(cells[at]) > col_widths[at] > 0:
+                    and isinstance(cells[at], (str, tuple)) \
+                    and ui.visual_len(_cell_text(cells[at])[0]) > (room := span_width(cells, columns, col_widths, at, eff, _EDGE_MARGIN, 5 if multi else 3)) > 0:
                 cells = list(cells)
-                cells[at] = ui.marquee(cells[at], col_widths[at], time.monotonic())
+                text, style = _cell_text(cells[at])
+                moved = ui.marquee(text, room, time.monotonic())
+                cells[at] = (moved, style) if style else moved
                 _scrolling[0] = True
             return cells
 
@@ -793,17 +832,17 @@ def _select_flat(message: str, choices: list, *,
                 else:
                     label = _clip_ansi(label, max_w - 1) + f"{C.RESET}…"
             if multi:
-                glyph = (f"{C.GREEN}✔{C.RESET}" if items[i].checked else f"{C.DIM}•{C.RESET}")
+                glyph = (f"{C.OK}✔{C.RESET}" if items[i].checked else f"{C.DIM}•{C.RESET}")
                 if items[i].disabled and not items[i].checked:
                     text = f"  {C.DIM}• {label}{C.RESET}"        # interlocked: dimmed, not selectable
                 else:
-                    text = f" {glyph} " + (f"{C.PRIMARY}{C.BOLD}{label}{C.RESET}" if i == cursor else label)
+                    text = f" {glyph} " + (f"{C.BOLD}{C.STRONG}{label}{C.RESET}" if i == cursor else label)
                 out.append(_row(text, i, i == cursor))
             elif items[i].disabled:
-                # Section heading / separator: dim, slightly outdented.
-                out.append(_row(f"{C.DIM}{C.BOLD}{label}{C.RESET}" if label else "", i, False))
+                # Section heading / separator: a minor title, slightly outdented.
+                out.append(_row(f"{C.HEADING}{label}{C.RESET}" if label else "", i, False))
             elif current:
-                out.append(_row(f" {C.PRIMARY}{C.BOLD}{label}{C.RESET}", i, True))
+                out.append(_row(f" {C.BOLD}{C.STRONG}{label}{C.RESET}", i, True))
             else:
                 out.append(_row(f" {label}", i, False))
             row_at[i] = len(out) - 1
@@ -827,11 +866,12 @@ def _select_flat(message: str, choices: list, *,
         else:
             out = h_lines + out
         # Where the rows landed, for clicks: the first row's line, and each row's
-        # plain text, to tell a click on a character from one on blank space.
+        # line, whose plain text tells a click on a character from one on blank
+        # space (worked out on a click, not every frame).
         _last_hlen[0] = first + len(pre) + (1 if viewport > 0 else 0)
         for i, k in row_at.items():
             if first + k < len(out):                 # a row the box had no room for has no text to click
-                _row_plain[i] = _plain(out[first + k])
+                _row_line[i] = out[first + k]
         # Inset the hint block by the left margin so it never hugs an edge; _hint
         # centres within _cols() (= width-2*MARGIN_H), so this makes it symmetric.
         # Pin the hint bar to the bottom (just above the miniplayer + status) so
@@ -1072,7 +1112,7 @@ def _select_flat(message: str, choices: list, *,
                 # character; clicking the blank space anywhere in a row (trailing
                 # padding, gaps between table columns, the empty left margin) just
                 # moves the highlight; it never enters.
-                row_plain = _row_plain.get(idx, "")
+                row_plain = _plain(_row_line.get(idx, ""))
                 on_char = 0 < col <= len(row_plain) and row_plain[col - 1] != ' '
                 if not on_char:
                     if clickable or (multi and items[idx].checked):
@@ -1166,10 +1206,10 @@ def live_select(message: str, provider: Callable[[str], list], *,
     cursor           = 0
     viewport         = 0
     _sel_last_click: int | None = None
-    # Maps a visible item index → its ANSI-stripped rendered text, so a mouse
-    # click can tell whether it landed on a printed character or blank space
-    # (shared hit-test convention with `select`).
-    _row_plain: dict[int, str] = {}
+    # Maps a visible item index → its rendered line, so a mouse click can tell
+    # whether it landed on a printed character or blank space (shared hit-test
+    # convention with `select`).
+    _row_line: dict[int, str] = {}
     _fixed_rows = [0]   # header + query + count + above-indicator lines, this frame
 
     base_hints = {L("search.up", "search.down"): "results", L("search.back"): "back",
@@ -1305,7 +1345,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
             vis += 1
         first = len(h_lines) + (1 if boxed else 0)      # where `out` starts on screen
         _fixed_rows[0] = first + len(out)   # rows before the first item: the click-math offset
-        _row_plain.clear()
+        _row_line.clear()
         row_at: dict[int, int] = {}
 
         eff = min(cols, _COLUMNS_MAX_WIDTH)
@@ -1330,9 +1370,9 @@ def live_select(message: str, provider: Callable[[str], list], *,
                 out.append(line[:ui.MARGIN_H] + ui.on_bar(line[ui.MARGIN_H:], cols - ui.MARGIN_H)
                            if i == cursor else line)
             elif it.disabled:
-                out.append(f"  {C.DIM}{C.BOLD}{it.title}{C.RESET}" if it.title else "")
+                out.append(f"  {C.HEADING}{it.title}{C.RESET}" if it.title else "")
             elif i == cursor:
-                out.append("  " + ui.on_bar(f" {C.PRIMARY}{C.BOLD}{it.title}{C.RESET}", cols - ui.MARGIN_H))
+                out.append("  " + ui.on_bar(f" {C.BOLD}{C.STRONG}{it.title}{C.RESET}", cols - ui.MARGIN_H))
             else:
                 out.append(f"   {it.title}")
             row_at[i] = len(out) - 1
@@ -1343,7 +1383,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
                else h_lines + out)
         for i, k in row_at.items():
             if first + k < len(out):                 # a row the box had no room for has no text to click
-                _row_plain[i] = _plain(out[first + k])
+                _row_line[i] = out[first + k]
         # Inset the hint block by the left margin so it never hugs an edge; _hint
         # centres within _cols() (= width-2*MARGIN_H), so this makes it symmetric.
         _filler = _hint_pin_target() - len(out) - len(hint_lines)
@@ -1353,6 +1393,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
         return [_clip_ansi(line, width) for line in out]
 
     result = None
+    _drop_backdrop = lambda: None      # noqa: E731 (none until the first frame)
     try:
         _set_raw(fd)
         enable_mouse()
@@ -1426,7 +1467,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
                 idx = viewport + i
                 if 0 <= idx < len(items):
                     clickable = not items[idx].disabled
-                    row_plain = _row_plain.get(idx, "")
+                    row_plain = _plain(_row_line.get(idx, ""))
                     on_char = 0 < col <= len(row_plain) and row_plain[col - 1] != ' '
                     if not on_char:
                         if clickable:
@@ -1480,6 +1521,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
                 query.insert(qpos, key); qpos += 1
                 _recompute(); w.render(_lines())
     finally:
+        _drop_backdrop()
         disable_mouse()
         _restore_term_attrs(fd, old)
         w.clear()

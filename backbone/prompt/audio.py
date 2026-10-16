@@ -10,7 +10,7 @@ from backbone.nav import QuitToTerminal
 from backbone.prompt.chrome import (
     boxed_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse,
 )
-from backbone.prompt.core import box_fits
+from backbone.prompt.core import box_fits, wheel_steady
 from backbone.prompt.text import text
 from backbone.prompt.core import C
 
@@ -276,7 +276,7 @@ def rva2_edit(message: str = "Volume adjustment:", gain: float = 0.0) -> float |
                   (L("list.quit"), "quit app")]
         _avail = _hint_pin_target() - 4 - len(chrome_hint_lines(_pairs))
         lines = _rva2_render_lines(gain, message, avail=_avail)
-        lines.append(f"  {C.ACCENT}▸{C.RESET} {C.BOLD}{gain:+.1f} dB{C.RESET}")
+        lines.append(f"  {C.ACCENT}›{C.RESET} {C.BOLD}{gain:+.1f} dB{C.RESET}")
         lines, _dx = boxed_chrome(lines, message, _pairs, _hint_cells)
         w.render(lines)
 
@@ -284,6 +284,7 @@ def rva2_edit(message: str = "Volume adjustment:", gain: float = 0.0) -> float |
     try:
         _set_raw(fd)
         enable_mouse()
+        wheel_steady(True)     # the wheel sets a level: no coasting past it
         screen_takeover_next()   # paint over the previous screen, no flash
         _render()
 
@@ -326,6 +327,7 @@ def rva2_edit(message: str = "Volume adjustment:", gain: float = 0.0) -> float |
                 gain = 0.0; _render()
 
     finally:
+        wheel_steady(False)
         disable_mouse()
         _restore_term_attrs(fd, old)
         w.clear()
@@ -377,7 +379,7 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
         if n:
             cursor = max(0, min(cursor, n - 1))
             f, g = bands[cursor]
-            status = f"{C.ACCENT}▸{C.RESET} {_eq_fmt_freq(f)} Hz   {C.BOLD}{g:+.1f} dB{C.RESET}"
+            status = f"{C.ACCENT}›{C.RESET} {_eq_fmt_freq(f)} Hz   {C.BOLD}{g:+.1f} dB{C.RESET}"
             if note:
                 status += f"   {C.DIM}· {note}{C.RESET}"
         else:
@@ -399,6 +401,7 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
     try:
         _set_raw(fd)
         enable_mouse()
+        wheel_steady(True)     # the wheel sets a level: no coasting past it
         screen_takeover_next()   # paint over the previous screen, no flash
         _render()
 
@@ -491,6 +494,7 @@ def equaliser_edit(message: str = "Equalisation:", adjustments: list | None = No
                     note = ""; _render()
 
     finally:
+        wheel_steady(False)
         disable_mouse()
         _restore_term_attrs(fd, old)
         w.clear()

@@ -14,12 +14,12 @@ from backbone.prompt.chrome import (  # noqa: F401
 )
 from backbone.prompt.text import multiline, overlay_checklist, overlay_text, path, system_editor_edit, text, token_completions  # noqa: F401
 from backbone.prompt.lists import ListPlace, confirm, live_select, options_menu, select  # noqa: F401
-from backbone.prompt.list_edit import list_edit  # noqa: F401
+from backbone.prompt.list_edit import list_edit, table_lines  # noqa: F401
 from backbone.prompt.dates import calendar_select, datetime_edit  # noqa: F401
 from backbone.prompt.values import fraction_edit, number_edit, rating_edit, time_edit  # noqa: F401
 from backbone.prompt.audio import equaliser_edit, rva2_edit  # noqa: F401
 from backbone.prompt.keymap import keys_editor  # noqa: F401
 from backbone.prompt.settings import (  # noqa: F401
-    ACCENT_COLUMNS, OFF_GLYPH, ON_GLYPH, SETTINGS_COLUMNS, accent_name, accent_swatch, index_of,
-    pick_accent, pick_option, space_toggles, state_glyph,
+    OFF_GLYPH, ON_GLYPH, SETTINGS_COLUMNS, THEME_COLUMNS, index_of, pick_option, pick_terminal_accent, pick_theme,
+    space_toggles, state_glyph, theme_name, theme_sample,
 )

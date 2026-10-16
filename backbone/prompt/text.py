@@ -9,8 +9,8 @@ from backbone.prompt.core import (
     _get_term_attrs, _set_raw, _restore_term_attrs, _wait_for_keypress, render_status_bar,
     block_cursor, block_cursor_width, _read_key, _cols, _wrap_bordered_input_lines,
     screen_paint, screen_invalidate, screen_takeover_next,
-    box_lines, screen_restore, screen_save, screen_span_paint, box_fits, help_corner_text,
-    relayout_under_overlay, redraw_under_overlay, overlay_layer, screen_crosses_box,
+    box_lines, box_fits, help_corner_text,
+    redraw_under_overlay, overlay_layer, screen_layer, screen_layer_close, screen_under_shows,
 )
 from backbone import keys, ui
 from backbone.prompt import chrome
@@ -76,7 +76,7 @@ def text(message: str, default: str = "", suggest=None, check=None, allow=None,
             body[0] = "  " + block_cursor(ui.truncate_text(placeholder, content_width), 0, base=C.DIM) + C.RESET
         problem = check(content) if check and content.strip() else None
         if problem:
-            body.append(f"  {C.RED if tried[0] else C.DIM}✗ {problem}{C.RESET}")
+            body.append(f"  {C.ERROR if tried[0] else C.DIM}✘ {problem}{C.RESET}")
         options = _options()
         if options:
             body.append("")
@@ -90,18 +90,7 @@ def text(message: str, default: str = "", suggest=None, check=None, allow=None,
             pairs = [("↑↓", "pick"), ("tab", "complete")] + pairs
         if chrome._value_toggle_enabled:
             pairs.append((keys.label("global.raw_text"), chrome._toggle_hint_label))
-        # The field in a box its own size (growing as the text wraps), a blank
-        # box under it to the hints holding any problem and the suggestions.
-        field, below = body[:len(rows)], body[len(rows):]
-        while below and not below[0]:
-            below.pop(0)
-        room = _hint_pin_target() - len(chrome.chrome_hint_lines(pairs)) - (len(field) + 2)
-        if box_fits() and room >= 3:
-            field_box = box_lines([ln[ui.MARGIN_H:] for ln in field], _cols(), len(field) + 2,
-                                  message.strip().rstrip(":"), help_corner_text(False)[0])
-            out, _dx = boxed_chrome(below, "", pairs, _hint_cells, header=field_box)
-        else:
-            out, _dx = boxed_chrome(body, message, pairs, _hint_cells)
+        out = field_frame(message, body[:len(rows)], body[len(rows):], pairs, _hint_cells)
 
         # One diffed frame (no full erase, no newlines): only the rows that
         # actually changed are written, so typing doesn't repaint the screen.
@@ -199,46 +188,86 @@ def text(message: str, default: str = "", suggest=None, check=None, allow=None,
     return result
 
 
+def field_frame(message: str, field: list, below: list, pairs, cells: dict) -> list:
+    """A typed field's whole frame: the `field` lines (with the usual left
+    margin) in a box their own size titled `message`, a box under it to the
+    hint bar holding `below` (a problem, a note that guides, suggestions),
+    then the bar. Where there's no room for both boxes, one box titled
+    `message` holds the field and what's below it."""
+    below = list(below)
+    while below and not below[0]:
+        below.pop(0)
+    room = _hint_pin_target() - len(chrome.chrome_hint_lines(pairs)) - (len(field) + 2)
+    if box_fits() and room >= 3:
+        field_box = box_lines([ln[ui.MARGIN_H:] for ln in field], _cols(), len(field) + 2,
+                              message.strip().rstrip(":"), help_corner_text(False)[0])
+        return boxed_chrome(below, "", pairs, cells, header=field_box)[0]
+    return boxed_chrome(list(field) + below, message, pairs, cells)[0]
+
+
 _SUGGESTIONS = 8                 # completions a text field lists at most
 
 _OVERLAY_W = 90                  # the overlay's widest; narrower windows get it less their margins
 
 
-def _overlay_place(h: int, widest: int) -> dict:
+def _overlay_place(h: int, widest: int, place: dict | None = None) -> dict:
     """Where a box `h` rows tall (borders included) and up to `widest` wide
-    goes over the middle of the screen, and what it covers (saved, to put
-    back). It takes the screen over at any size: inside the margins while
-    they leave room, else edge to edge; as many rows as there are (h: the
-    rows it gets); a single row (h: 1, no box) when there's no room for one."""
+    goes over the middle of the screen: inside the margins while they leave
+    room, else edge to edge; as many rows as there are (h: the rows it
+    gets); a single row (h: 1, no box) when there's no room for one. Laid
+    out again (`place`, after a resize), the layer moves with it. The screen
+    under it stays as it is, except where it can't show at this size: then
+    the window is the box's alone (no box, no content), and the screen comes
+    back when it can (the overlay closing, or the window growing)."""
     cols, rows = ui.get_terminal_size()
     room = cols - 4 * ui.MARGIN_H if cols - 4 * ui.MARGIN_H >= 24 else cols
     w = max(1, min(room, widest))
     h = min(h, rows) if rows >= 3 and w >= 10 else 1
     if h == 1:
         w = cols
-    top, left = max(1, (rows - h) // 2 + 1), max(1, (cols - w) // 2 + 1)
-    # A window too small for boxes, or a box under it would be cut through
-    # (half a box is no box): it takes the window, the screen under it put back after.
-    alone = not box_fits() or screen_crosses_box(top, top + h - 1, left, left + w - 1)
-    if alone:
-        sys.stdout.write("\033[H\033[2J")
+    place = place if place is not None else {}
+    shows = screen_under_shows()
+    if not shows and not place.get('wiped'):
+        sys.stdout.write("\033[H\033[2J")       # the screen under it can't keep its boxes here
+        sys.stdout.flush()
         screen_invalidate()
-    return dict(top=top, left=left, w=w, h=h, alone=alone,
-                saved=screen_save(top, top + h - 1, left, left + w - 1))
+    place.update(top=max(1, (rows - h) // 2 + 1), left=max(1, (cols - w) // 2 + 1), w=w, h=h,
+                 size=(cols, rows), wiped=not shows)
+    return place
+
+
+def _overlay_show(place: dict, lines: list) -> None:
+    """Draw an overlay's lines as its layer, over the screen."""
+    place['layer'] = screen_layer(lines, place['top'], place['left'], place.get('layer'))
+
+
+def _overlay_resized(place: dict, h: int, widest: int, render) -> bool:
+    """After a resize: the overlay laid out again and drawn, then the screen
+    under it drawn again at the new size round it (where it can show), then
+    the overlay once more, over any picture that screen sent. Whether the
+    window had changed size."""
+    if ui.get_terminal_size() == place.get('size'):
+        return False
+    was_wiped = place.get('wiped')
+    _overlay_place(h, widest, place)
+    render()
+    if place['wiped']:
+        if not was_wiped:
+            ui.request_relayout()              # the screen lays itself out once it can show again
+    else:
+        redraw_under_overlay()
+    render()
+    return True
 
 
 def _overlay_close(place: dict) -> None:
-    """Put back what an overlay covered: the cells under it, or, where it had
-    the window to itself, the whole screen under it drawn again."""
+    """Take an overlay's layer away, the screen under it as it is put back
+    cell by cell; where it had the window to itself, the screen drawn again."""
     if not place:
         return
-    if place.get('alone'):                  # the window was the box's alone: cleared, then the screen drawn whole
-        sys.stdout.write("\033[H\033[2J")
-        screen_invalidate()
+    screen_layer_close(place.get('layer'))
+    if place.get('wiped'):
         redraw_under_overlay()
-    else:
-        sys.stdout.write(screen_restore(place['saved']))
-    sys.stdout.flush()
 
 
 def _overlay_keys(title: str, keys: str, width: int) -> str:
@@ -270,9 +299,6 @@ def overlay_text(message: str, default: str = "", hint: str = "↵ run · esc",
     old = _get_term_attrs(fd)
     place: dict = {}
 
-    def _open() -> None:
-        place.update(_overlay_place(3, _OVERLAY_W))
-
     def _render() -> None:
         boxed = place['h'] == 3
         # The border holds the title whole before the keys: short of room for
@@ -294,21 +320,16 @@ def overlay_text(message: str, default: str = "", hint: str = "↵ run · esc",
                 lines = [ln[ui.MARGIN_H:] for ln in box_lines([shown], place['w'], 3, message, keys_hint)]
         if not boxed:                               # no room for a box: the field across one row
             lines = [prefix + shown + " " * max(0, inner - ui.visual_len(shown))]
-        sys.stdout.write("".join(screen_span_paint(place['top'] + k, place['left'], ln)
-                                 for k, ln in enumerate(lines)))
-        sys.stdout.flush()
+        _overlay_show(place, lines)
 
     result = None
     _close_layer = overlay_layer()                 # over the screen showing; it meets any size itself
     try:
         _set_raw(fd)
-        _open()
+        _overlay_place(3, _OVERLAY_W, place)
         _render()
         while True:
-            if ui.consume_resize():
-                relayout_under_overlay()
-                _open()
-                _render()
+            _overlay_resized(place, 3, _OVERLAY_W, _render)
             if not _wait_for_keypress(0.05):
                 continue
             key = _read_key(fd)
@@ -351,9 +372,9 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
         out = []
         for i, c in enumerate(items):
             if i == len(rows) and actions:
-                out.append(f"{C.DIM}{'─' * max(0, place['w'] - 4)}{C.RESET}")
+                out.append(f"{C.FRAME}{'─' * max(0, place['w'] - 4)}{C.RESET}")
             if i < len(rows):
-                mark = f"{C.GREEN}✔{C.RESET}" if c.value in checked else f"{C.DIM}•{C.RESET}"
+                mark = f"{C.OK}✔{C.RESET}" if c.value in checked else f"{C.DIM}•{C.RESET}"
                 text = f"{mark} {c.title}"
             else:
                 text = f"  {c.title}"
@@ -362,10 +383,9 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
             out.append(ui.on_bar(text, place['w'] - 4) if i == at else text)
         return out
 
-    def _open() -> None:
-        place.update(_overlay_place(len(items) + (1 if actions else 0) + 2,
-                                    max(24, max(ui.visual_len(str(c.title)) for c in items) + 12,
-                                        ui.visual_len(title) + ui.visual_len(hint) + 10)))   # its keys in the border too
+    tall = len(items) + (1 if actions else 0) + 2
+    widest = max(24, max(ui.visual_len(str(c.title)) for c in items) + 12,
+                 ui.visual_len(title) + ui.visual_len(hint) + 10)              # its keys in the border too
 
     def _render() -> None:
         body = _lines()
@@ -374,21 +394,17 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
         first = max(0, min(line_at - room + 1, len(body) - room)) if line_at >= room else 0
         lines = [ln[ui.MARGIN_H:] for ln in box_lines(body[first:first + room], place['w'], place['h'], title,
                                                       _overlay_keys(title, hint, place['w']))]
-        lines = [ln + " " * max(0, place['w'] - ui.visual_len(ln)) for ln in lines]
-        sys.stdout.write("".join(screen_span_paint(place['top'] + k, place['left'], ln)
-                                 for k, ln in enumerate(lines)))
-        sys.stdout.flush()
+        _overlay_show(place, [ln + " " * max(0, place['w'] - ui.visual_len(ln)) for ln in lines])
 
     picked = None
     _close_layer = overlay_layer()                 # over the screen showing; it meets any size itself
     try:
         _set_raw(fd)
-        _open()
-        while place['h'] >= 3:                     # no box, no list: it closes (as Esc) where one won't fit
+        _overlay_place(tall, widest, place)
+        if place['h'] >= 3:
             _render()
-            if ui.consume_resize():
-                relayout_under_overlay()
-                _open()
+        while place['h'] >= 3:                     # no box, no list: it closes (as Esc) where one won't fit
+            if _overlay_resized(place, tall, widest, lambda: place['h'] >= 3 and _render()):
                 continue
             if not _wait_for_keypress(0.05):
                 continue
@@ -402,6 +418,7 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
             elif key == 'ENTER':
                 picked = items[at].value
                 break
+            _render()
     finally:
         _close_layer()                             # first: what's put back is the screen's own
         _overlay_close(place)
@@ -683,7 +700,7 @@ def _styled(text: str, a: int, marks: dict, caret: int | None) -> str:
             cur = st
         out.append(ch)
     if caret is not None and caret >= a + len(text):
-        out.append(f"{C.RESET}{C.BACK}█")
+        out.append(f"{C.RESET}{C.INVERT}█")
         cur = "x"
     return "".join(out) + (C.RESET if cur else "")
 

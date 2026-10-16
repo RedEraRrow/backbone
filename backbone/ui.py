@@ -2,6 +2,7 @@
 scanner, formatting, the status bar, the now-playing box registry, the alt
 screen and the progress bar."""
 from __future__ import annotations
+import functools
 import os
 import sys
 import shutil
@@ -14,7 +15,6 @@ from itertools import groupby
 from pathlib import Path
 
 from backbone import nav
-from backbone.nav import NAV_STACK
 from backbone.log import quietly
 
 # Status-bar messages: an ordinary one, and a warning or error worth reading.
@@ -103,37 +103,44 @@ MARGIN_V = 1   # rows reserved on each vertical side (top and bottom)
 FOOTER_GLYPH_COLS = ((0, 2), (4, 2))
 
 class Colors:
-    """The named palette every widget uses, and RED for what failed.
-    All empty when colour is off (NO_COLOR, or set_colour(False))."""
-    PRIMARY = "\033[1;37m" # Bold white
-    WHITE = "\033[37m" # Normal white
-    ACCENT = "\033[1;32m"   # green; a host's setting changes it through set_accent
-    ACCENT2 = "\033[1;36m"  # the second accent (borders, the active tab): set_accent(…, secondary=True)
-    CYAN = "\033[1;36m"
-    YELLOW = "\033[1;33m"
-    MAGENTA = "\033[1;35m"
-    GREEN = "\033[1;32m"
+    """What every screen paints with: the weights (DIM, BOLD, …), the cursor
+    controls, and the theme's roles, each named for what it marks (see
+    THEMES). set_theme fills the roles; all of them are empty when colour is
+    off (NO_COLOR, or set_colour(False))."""
+    # The theme's roles; the Terminal theme's, on a dark background, until set_theme.
+    ACCENT = "\033[1;32m"     # the cursor ›, the picked thing, edits, what's playing, key letters
+    ACCENT2 = "\033[1;36m"    # the focused box's title and border, the active tab
+    STRONG = "\033[1m"        # bright text: the current row, values, a progress bar's played part
+    OK = "\033[1;32m"         # ✔, done
+    WARN = "\033[1;33m"       # ⚠
+    ERROR = "\033[1;31m"      # a failure
+    INFO = "\033[1;36m"       # two more hues, for screens that tell several kinds apart
+    NOTE = "\033[1;35m"
+    MUTED = "\033[2m"         # quiet marks that aren't text: map land
+    FRAME = "\033[2m"         # every box's border, and the rules and separators inside one
+    HEADING = "\033[1;2m"     # a minor title: a list's section headings
+    GROUP = "\033[1m"         # a group's title among its rows: a disc's, a work's
+    BAR = "\033[48;5;237m"    # behind the highlighted row of the list you're in
+    BAR_DIM = "\033[48;5;235m"  # behind the row a column above opened, or the one playing
+    # Weights and cursor controls: every theme's the same, but for a fixed
+    # theme's DIM and BOLD (see theme_codes).
     DIM = "\033[2m"
     BOLD = "\033[1m"
     ITALIC = "\033[3m"
     UNDERLINE = "\033[4m"
     RESET = "\033[0m"
-    BACK = "\x1b[47m"
     INVERT = "\033[7m"
-    # Highlight bars, a soft grey behind a row: the highlighted row of the list
-    # you're in, and (fainter) the row a column of the level above opened.
-    BAR = "\033[48;5;237m"
-    BAR_DIM = "\033[48;5;235m"
     HIDE = "\033[?25l"
     SHOW = "\033[?25h"
-    RED = "\033[38;5;167m"   # a failure: a text field's problem, backcrack's FAIL lines
 
+
+ROLES = ('ACCENT', 'ACCENT2', 'STRONG', 'OK', 'WARN', 'ERROR', 'INFO', 'NOTE', 'MUTED', 'FRAME', 'HEADING',
+         'GROUP', 'BAR', 'BAR_DIM')
 
 # The styling half of Colors: everything that paints rather than moves the
 # cursor. Suppressing colour must not suppress HIDE/SHOW, which are cursor
 # control and still needed on a pipe.
-_STYLE_NAMES = ('PRIMARY', 'WHITE', 'ACCENT', 'ACCENT2', 'CYAN', 'YELLOW', 'MAGENTA', 'GREEN',
-                'DIM', 'BOLD', 'ITALIC', 'UNDERLINE', 'RESET', 'BACK', 'INVERT', 'BAR', 'BAR_DIM', 'RED')
+_STYLE_NAMES = ROLES + ('DIM', 'BOLD', 'ITALIC', 'UNDERLINE', 'RESET', 'INVERT')
 _STYLE_CODES = {name: getattr(Colors, name) for name in _STYLE_NAMES}
 
 
@@ -173,25 +180,109 @@ def set_colour(enabled: bool) -> None:
     _colour_on = enabled
     for name, code in _STYLE_CODES.items():
         setattr(Colors, name, code if enabled else "")
+    if _full['on'] or enabled:
+        _paint_terminal()
 
 
 _colour_on = True
+# Whether the terminal's default colours are a theme's now, and whether it
+# takes them at all (None: not tried yet). See _paint_terminal: a fixed theme
+# sets them with OSC 10 / 11 on the app's screen and puts them back with OSC
+# 110 / 111; whether they took is checked the first time by reading back.
+_full = {'on': None, 'supported': None}   # on: the theme whose colours are set
 
 # NO_COLOR turns colour off from the start; a host can also call set_colour.
 USE_COLOR = os.environ.get("NO_COLOR") is None
 if not USE_COLOR:
     set_colour(False)
 
-# The accent: terminal-palette colours first (they follow the terminal's own
-# theme), then fixed ones. Stored in `accent_colour` as a key or as "#RRGGBB".
-ACCENT_PRESETS = [
-    ('green', 'Green', 32), ('red', 'Red', 31), ('yellow', 'Yellow', 33),
-    ('blue', 'Blue', 34), ('magenta', 'Magenta', 35), ('cyan', 'Cyan', 36),
-    ('amber', 'Amber', '#FFB000'), ('coral', 'Coral', '#FF7F66'), ('rose', 'Rose', '#F06292'),
-    ('lavender', 'Lavender', '#B39DDB'), ('sky', 'Sky', '#4FC3F7'), ('mint', 'Mint', '#6FDFA8'),
-]
-DEFAULT_ACCENT = 'green'
-DEFAULT_ACCENT2 = 'cyan'
+
+# --- themes -----------------------------------------------------------------
+# A theme fills every role in ROLES. Terminal is made of the terminal's own
+# sixteen colours, so it follows the terminal's theme; only its highlight bars
+# need to know whether the background is light or dark. The others are fixed
+# colours ("#RRGGBB"), the whole app's: on the app's screen their TEXT and BG
+# are the terminal's own default colours while it runs (see _paint_terminal),
+# so every reset, blank and clear is the theme's too. Each is made for a dark
+# background except those in _LIGHT_THEMES (Pocket), made for a light one.
+
+_TERMINAL = {'ACCENT': "\033[1;32m", 'ACCENT2': "\033[1;36m", 'STRONG': "\033[1m",
+             'OK': "\033[1;32m", 'WARN': "\033[1;33m", 'ERROR': "\033[1;31m",
+             'INFO': "\033[1;36m", 'NOTE': "\033[1;35m", 'MUTED': "\033[2m", 'FRAME': "\033[2m",
+             'HEADING': "\033[1;2m", 'GROUP': "\033[1m"}
+_TERMINAL_BARS = {False: ("\033[48;5;237m", "\033[48;5;235m"),   # dark background
+                  True: ("\033[48;5;253m", "\033[48;5;255m")}    # light background
+
+# name -> (label, TEXT, BG and every role as "#RRGGBB"). Each is a classic
+# look in its own few colours: the single-colour ones (Matrix, Amber, Pocket)
+# tell OK, WARN and ERROR apart by brightness, as those screens did.
+_FIXED = {
+    'teletext': ("Teletext", dict(                     # a teletext index page, in its eight colours:
+        TEXT="#FFFF00", ACCENT="#FFFF00", ACCENT2="#FFFF00", STRONG="#FFFF00",   # yellow the main colour,
+        DIM="#FFFFFF", HEADING="#00FFFF", GROUP="#FFFFFF", BG="#000000",   # white what's secondary (a disc's title too), cyan the minor titles,
+        FRAME="#0000FF", BAR="#0000FF", BAR_DIM="#00007F",       # blue bands round and across it
+        OK="#00FF00", WARN="#FF00FF", ERROR="#FF0000", INFO="#00FFFF", NOTE="#FFFFFF",
+        MUTED="#0000FF")),
+    'matrix': ("Matrix", dict(                         # phosphor green on black
+        TEXT="#00FF41", BG="#000000", ACCENT="#CCFFD8", ACCENT2="#39FF14", STRONG="#B6FFC5",
+        OK="#00FF41", WARN="#9CFF57", ERROR="#F0FFF0", INFO="#00D936", NOTE="#7DFF9F",
+        MUTED="#00802A", BAR="#00401A", BAR_DIM="#00230E")),
+    'amber': ("Amber", dict(                           # an amber monochrome terminal
+        TEXT="#FFB000", BG="#120A00", ACCENT="#FFE0A0", ACCENT2="#FFC640", STRONG="#FFD27F",
+        OK="#FFB000", WARN="#FFCF40", ERROR="#FFF4E0", INFO="#E89B00", NOTE="#FFCC80",
+        MUTED="#8C5E00", BAR="#4A2E00", BAR_DIM="#2A1A00")),
+    'dos': ("DOS", dict(                               # yellow on CGA blue, the old IDEs
+        TEXT="#FFFF55", BG="#0000AA", ACCENT="#55FFFF", ACCENT2="#FFFFFF", STRONG="#FFFFFF",
+        OK="#55FF55", WARN="#FF55FF", ERROR="#FF5555", INFO="#55FFFF", NOTE="#AAAAAA",
+        MUTED="#5555FF", BAR="#0000FF", BAR_DIM="#000077")),
+    'basic': ("BASIC", dict(                           # a home micro's boot screen
+        TEXT="#B4AAF5", BG="#40318D", ACCENT="#E2EE8C", ACCENT2="#8EE3EA", STRONG="#FFFFFF",
+        OK="#A8F09C", WARN="#E2EE8C", ERROR="#FF9C94", INFO="#8EE3EA", NOTE="#D6D6D6",
+        MUTED="#7F72D6", BAR="#2A1F6A", BAR_DIM="#35287C")),   # lighter than the original, to be read
+    'pocket': ("Pocket", dict(                         # a pocket console's four greens
+        TEXT="#0F380F", BG="#9BBC0F", ACCENT="#306230", ACCENT2="#0F380F", STRONG="#0F380F",
+        OK="#306230", WARN="#0F380F", ERROR="#0F380F", INFO="#306230", NOTE="#306230",
+        MUTED="#306230", BAR="#8BAC0F", BAR_DIM="#93B40F")),
+    # Checked to WCAG AAA: every text colour 7:1 or more on the background,
+    # the status colours apart under red-green and blue-yellow colour blindness
+    # (OK is green turned to mint, away from red). Its own DIM: the terminal's
+    # faint is anyone's guess. Its bars aren't backgrounds, which a coloured
+    # line can't be read on at 7:1: the row you're on is underlined, the row
+    # opened or playing bold.
+    'contrast': ("High contrast", dict(
+        TEXT="#FFFFFF", BG="#000000", DIM="#D9D9D9", ACCENT="#FFFF00", ACCENT2="#A6C8FF", STRONG="#FFFFFF",
+        OK="#3DFFBE", WARN="#FF9E3D", ERROR="#FF6666", INFO="#00FFFF", NOTE="#C69CFF",
+        MUTED="#D9D9D9", BAR="\033[4m", BAR_DIM="\033[1m")),
+}
+# Terminal's accents can be any of the terminal's own colours, plain or
+# bright, so they still follow its palette: name -> (label, code).
+TERMINAL_ACCENTS = {
+    'green': ("Green", "\033[1;32m"), 'red': ("Red", "\033[1;31m"), 'yellow': ("Yellow", "\033[1;33m"),
+    'blue': ("Blue", "\033[1;34m"), 'magenta': ("Magenta", "\033[1;35m"), 'cyan': ("Cyan", "\033[1;36m"),
+    'bright green': ("Bright green", "\033[1;92m"), 'bright red': ("Bright red", "\033[1;91m"),
+    'bright yellow': ("Bright yellow", "\033[1;93m"), 'bright blue': ("Bright blue", "\033[1;94m"),
+    'bright magenta': ("Bright magenta", "\033[1;95m"), 'bright cyan': ("Bright cyan", "\033[1;96m"),
+}
+DEFAULT_ACCENTS = ('green', 'cyan')
+_accents = list(DEFAULT_ACCENTS)     # Terminal's, as chosen (set_terminal_accents)
+
+
+def set_terminal_accents(first: str | None, second: str | None) -> None:
+    """Terminal's two accents from now on, TERMINAL_ACCENTS names (an unknown
+    one is the default): a tool's setting, given once at startup and again when
+    changed. Repaints at once when Terminal (or a theme built on it) is on."""
+    _accents[:] = [n if n in TERMINAL_ACCENTS else d for n, d in zip((first, second), DEFAULT_ACCENTS)]
+    if _theme[0] == DEFAULT_THEME:
+        set_theme(_theme[0], _last_overrides[0])
+
+
+def terminal_accent_names() -> tuple:
+    """Terminal's two accents as chosen."""
+    return tuple(_accents)
+
+
+THEMES = {'terminal': "Terminal", **{name: label for name, (label, _roles) in _FIXED.items()}}
+DEFAULT_THEME = 'terminal'
 
 
 def parse_hex_colour(text: str) -> tuple[int, int, int] | None:
@@ -207,42 +298,287 @@ def parse_hex_colour(text: str) -> tuple[int, int, int] | None:
         return None
 
 
-def _rgb_code(r: int, g: int, b: int) -> str:
-    """Bold foreground in exactly this colour on a 24-bit terminal, else the
-    nearest of the 256-colour palette's 6×6×6 cube or grey ramp."""
+def rgb_code(colour: str, background: bool = False, bold: bool = True) -> str:
+    """The code for "#RRGGBB": text in that colour, bold unless not `bold`
+    (or, `background`, the colour behind text), exact on a 24-bit terminal,
+    else the nearest of the 256-colour palette's 6×6×6 cube or grey ramp."""
+    r, g, b = parse_hex_colour(colour) or (128, 128, 128)
+    lead = "48" if background else ("1;38" if bold else "38")
     if os.environ.get('COLORTERM', '').lower() in ('truecolor', '24bit'):
-        return f"\033[1;38;2;{r};{g};{b}m"
+        return f"\033[{lead};2;{r};{g};{b}m"
     if max(r, g, b) - min(r, g, b) < 12:                       # a grey
         n = 232 + min(23, max(0, round((r - 8) / 10)))
     else:
         n = 16 + sum(round(v / 255 * 5) * m for v, m in ((r, 36), (g, 6), (b, 1)))
-    return f"\033[1;38;5;{n}m"
+    return f"\033[{lead};5;{n}m"
 
 
-def accent_code(value) -> str | None:
-    """The escape code for an `accent_colour` value (a preset key or a hex
-    colour), or None when it is neither."""
-    for key, _name, colour in ACCENT_PRESETS:
-        if value == key:
-            return f"\033[1;{colour}m" if isinstance(colour, int) else _rgb_code(*parse_hex_colour(colour))
-    rgb = parse_hex_colour(value) if isinstance(value, str) and value.startswith('#') else None
-    return _rgb_code(*rgb) if rgb else None
+def theme_codes(name: str, overrides: dict | None = None) -> dict:
+    """Every role's code in the theme `name` (Terminal when unknown), and its
+    DIM (the terminal's faint, unless the theme has its own), with
+    `overrides` ({role: "#RRGGBB"}) laid over it."""
+    if name in _FIXED:
+        t = _FIXED[name][1]
+        # FRAME, when a theme doesn't give one, is its DIM: borders drawn as
+        # quietly as the rest of what's secondary;
+        # HEADING its DIM in bold, as Terminal's are; and GROUP its TEXT in bold.
+        frame, heading = t.get('FRAME') or t.get('DIM'), t.get('HEADING') or t.get('DIM')
+        codes = {role: _role_code(role, t[role]) for role in ROLES if role not in ('FRAME', 'HEADING', 'GROUP')}
+        codes['FRAME'] = _role_code('FRAME', frame) if frame else "\033[2m"
+        codes['HEADING'] = rgb_code(heading) if heading else "\033[1;2m"
+        codes['GROUP'] = rgb_code(t.get('GROUP') or t['TEXT'])
+    else:
+        codes = dict(_TERMINAL)
+        codes['ACCENT'], codes['ACCENT2'] = (TERMINAL_ACCENTS[n][1] for n in _accents)
+        codes['BAR'], codes['BAR_DIM'] = _TERMINAL_BARS[background_is_light()]
+    own_dim = _FIXED[name][1].get('DIM') if name in _FIXED else None     # a theme that won't trust the faint
+    codes['DIM'] = _role_code('DIM', own_dim) if own_dim else "\033[2m"
+    # A fixed theme's bold is in its own TEXT colour: bold in the terminal's
+    # default colour is drawn in the terminal's bold colour (iTerm's "Bold
+    # Color"), which the theme can't set. So BOLD goes before a colour, not after.
+    codes['BOLD'] = rgb_code(_FIXED[name][1]['TEXT']) if name in _FIXED else "\033[1m"
+    for role, colour in (overrides or {}).items():
+        codes[role] = _role_code(role, colour)
+    return codes
 
 
-def accent_label(value) -> str:
-    """What Settings calls an `accent_colour` value."""
-    return next((name for key, name, _ in ACCENT_PRESETS if key == value),
-                str(value).upper() if accent_code(value) else 'Green')
+def _role_code(role: str, colour: str) -> str:
+    """A role's code for "#RRGGBB": the bars are behind text, MUTED, DIM and
+    FRAME are quiet (not bold), the rest bold text. A value that's already a code
+    (a bar that's an underline) is used as it is."""
+    if colour.startswith("\033["):
+        return colour
+    return rgb_code(colour, background=role.startswith('BAR'), bold=role not in ('MUTED', 'DIM', 'FRAME'))
 
 
-def set_accent(value, secondary: bool = False) -> None:
-    """Use `value` (a preset key or "#RRGGBB") as the accent from now on, or as
-    the second accent; an unknown value falls back to that one's default."""
-    slot = 'ACCENT2' if secondary else 'ACCENT'
-    code = accent_code(value) or accent_code(DEFAULT_ACCENT2 if secondary else DEFAULT_ACCENT)
-    _STYLE_CODES[slot] = code
-    if _colour_on:
-        setattr(Colors, slot, code)
+_theme = [DEFAULT_THEME]
+_last_overrides = [None]              # the overrides set_theme was last given
+
+
+def set_theme(name: str, overrides: dict | None = None) -> None:
+    """Paint with the theme `name` (a THEMES key; Terminal when unknown) from
+    now on, `overrides` ({role: "#RRGGBB" or a code}) laid over it: a host's
+    own variation, like colours taken from album art. (Terminal's chosen
+    accents are its own: set_terminal_accents.) When that changes any
+    colour, the screen that's up lays itself out again (as after a resize),
+    so it's all in the new colours at once, whichever thread set them."""
+    _theme[0] = name if isinstance(name, str) and name in THEMES else DEFAULT_THEME
+    _last_overrides[0] = overrides
+    codes = theme_codes(_theme[0], overrides)
+    changed = any(_STYLE_CODES.get(role) != code for role, code in codes.items())
+    for role, code in codes.items():
+        _STYLE_CODES[role] = code
+        if _colour_on:
+            setattr(Colors, role, code)
+    _paint_terminal()
+    if changed:
+        request_relayout()
+
+
+def contrast_ratio(a: str, b: str) -> float:
+    """WCAG contrast ratio of two "#RRGGBB" colours (1 to 21)."""
+    def lum(colour):
+        f = lambda c: c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4   # noqa: E731
+        r, g, b = (f(v / 255) for v in parse_hex_colour(colour) or (0, 0, 0))
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def readable(colour: str, against: str, ratio: float = 4.5) -> str:
+    """`colour` itself when it reads against `against` at `ratio`, else the
+    nearest that does with the same hue and saturation: only its lightness
+    moves, away from the background's, and only as far as it has to."""
+    import colorsys
+    if contrast_ratio(colour, against) >= ratio:
+        return colour
+    h, l, s = colorsys.rgb_to_hls(*(v / 255 for v in parse_hex_colour(colour)))
+    lighter = contrast_ratio("#FFFFFF", against) >= contrast_ratio("#000000", against)
+    for step in range(1, 101):
+        tone = min(1.0, l + step / 100) if lighter else max(0.0, l - step / 100)
+        out = "#%02X%02X%02X" % tuple(round(v * 255) for v in colorsys.hls_to_rgb(h, tone, s))
+        if contrast_ratio(out, against) >= ratio:
+            return out
+    return "#FFFFFF" if lighter else "#000000"
+
+
+def terminal_background() -> str:
+    """The terminal's own background as "#RRGGBB": as it said when asked, else
+    white or black by background_is_light."""
+    light = background_is_light()
+    return _own['BG'] or ("#FFFFFF" if light else "#000000")
+
+
+def theme_text(name: str) -> str:
+    """The code for the theme `name`'s ordinary text, to show it as it would
+    look whatever theme is on now: a fixed theme's own, or for Terminal the
+    terminal's own (as asked before any theme changed it)."""
+    colour = _FIXED[name][1]['TEXT'] if name in _FIXED else _own['TEXT']
+    return rgb_code(colour, bold=False) if colour else "\033[39m"
+
+
+def theme_background(name: str) -> str:
+    """The code for the theme `name`'s background, the same way as theme_text."""
+    background_is_light()                            # the terminal's own asked, if not yet
+    colour = _FIXED[name][1]['BG'] if name in _FIXED else _own['BG']
+    return rgb_code(colour, background=True) if colour else "\033[49m"
+
+
+# While the app's screen is up with a fixed theme, the terminal's own default
+# text and background colours are the theme's (_full, above), put back when it
+# isn't.
+
+
+def _osc_rgb(colour: str) -> str:
+    r, g, b = parse_hex_colour(colour) or (0, 0, 0)
+    return f"rgb:{r:02x}/{g:02x}/{b:02x}"
+
+
+def _paint_terminal() -> None:
+    """Make the terminal's default colours the theme's, or put its own back,
+    whichever the moment calls for. Not while output is being captured (a
+    command run from the app's `:` line): the screen stays as it is."""
+    if sys.stdout is not sys.__stdout__:
+        return
+    want = (_theme[0] in _FIXED and _in_app[0] and _colour_on and _full['supported'] is not False
+            and sys.stdout.isatty())
+    if want and _full['on'] == _theme[0]:
+        return                                       # its colours are set already: nothing to write
+    if want:
+        background_is_light()                        # the terminal's own, read before it changes
+        roles = _FIXED[_theme[0]][1]
+        sys.stdout.write(f"\033]10;{_osc_rgb(roles['TEXT'])}\033\\\033]11;{_osc_rgb(roles['BG'])}\033\\")
+        sys.stdout.flush()
+        _full['on'] = _theme[0]
+        if _full['supported'] is None:
+            got = _rgb_from_reply(_ask_terminal(b"\033]11;?\033\\"))
+            wanted = [v / 255 for v in parse_hex_colour(roles['BG'])]
+            _full['supported'] = got is not None and all(abs(a - b) < 0.02 for a, b in zip(got, wanted))
+            if not _full['supported']:
+                _paint_terminal()                    # put back whatever half took
+    elif _full['on']:
+        sys.stdout.write("\033]110\033\\\033]111\033\\")
+        sys.stdout.flush()
+        _full['on'] = None
+
+
+def full_themes_supported() -> bool | None:
+    """Whether this terminal takes a theme's own background: None until a
+    fixed theme has been shown on the app's screen."""
+    return _full['supported']
+
+
+def _put_terminal_back() -> None:
+    """At exit, however it comes: the terminal's own colours back."""
+    if _full['on']:
+        _in_app[0] = False
+        _paint_terminal()
+
+
+import atexit as _atexit  # noqa: E402
+_atexit.register(_put_terminal_back)
+
+
+def current_theme() -> str:
+    """The THEMES key last set."""
+    return _theme[0]
+
+
+_LIGHT_THEMES = {'pocket'}
+
+
+def theme_is_light() -> bool:
+    """Whether the theme is drawn for a light background: Terminal's is the
+    terminal's own; a fixed theme's is the one it was made for."""
+    return background_is_light() if _theme[0] == 'terminal' else _theme[0] in _LIGHT_THEMES
+
+
+# --- the terminal's background ----------------------------------------------
+
+_light = [None]
+_own = {'TEXT': None, 'BG': None}   # the terminal's own colours, "#RRGGBB", once asked (before any theme's)
+
+
+def _ask_background() -> bool | None:
+    """Ask the terminal its text and background colours (OSC 10, 11),
+    keeping both, and whether the background is light, or None when it
+    won't say."""
+    reply = _ask_terminal(b"\033]10;?\033\\\033]11;?\033\\")
+    for role, code in (('TEXT', b"10"), ('BG', b"11")):
+        rgb = _rgb_from_reply(reply, code)
+        if rgb is not None:
+            _own[role] = "#%02X%02X%02X" % tuple(round(v * 255) for v in rgb)
+    return _light_from_reply(reply)
+
+
+def _ask_terminal(request: bytes) -> bytes:
+    """Send `request` and return what the terminal answers (b"" when it isn't
+    a terminal). A device-attributes request goes after it, which every
+    terminal answers: once that answer is in, any reply to the first has come,
+    so a terminal that ignores it costs no wait and leaves nothing behind to be
+    read as a keypress."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return b""
+    try:
+        import termios
+        import select as _select
+    except ImportError:
+        return b""
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+    except termios.error:
+        return b""
+    reply = b""
+    try:
+        new = termios.tcgetattr(fd)
+        new[3] &= ~(termios.ICANON | termios.ECHO)
+        termios.tcsetattr(fd, termios.TCSANOW, new)
+        sys.stdout.flush()
+        os.write(sys.stdout.fileno(), request + b"\033[c")
+        end = _time.monotonic() + 0.5
+        while _time.monotonic() < end and not re.search(rb"\033\[\?[0-9;]*c", reply):
+            ready, _, _ = _select.select([fd], [], [], max(0.0, end - _time.monotonic()))
+            if not ready:
+                break
+            reply += os.read(fd, 1024)
+    except OSError:
+        return b""
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, old)
+    return reply
+
+
+def _rgb_from_reply(reply: bytes, code: bytes = b"11") -> tuple | None:
+    """The colour (r, g, b, each 0-1) in an OSC 11 (or `code`) reply
+    ("…]11;rgb:RRRR/GGGG/BBBB…"), or None when there's no such reply in it."""
+    m = re.search(rb"\]" + code + rb";rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)", reply)
+    return tuple(int(x, 16) / (16 ** len(x) - 1) for x in m.groups()) if m else None
+
+
+def _light_from_reply(reply: bytes) -> bool | None:
+    """Whether an OSC 11 reply names a light colour, or None when there's no
+    such reply in it."""
+    rgb = _rgb_from_reply(reply)
+    return None if rgb is None else 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > 0.5
+
+
+def _background_from_env() -> bool | None:
+    """COLORFGBG ("15;0": foreground;background palette numbers), which some
+    terminals set: a light background is 7 or 15."""
+    bg = os.environ.get("COLORFGBG", "").split(";")[-1]
+    return bg in ("7", "15") if bg.isdigit() else None
+
+
+def background_is_light() -> bool:
+    """Whether the terminal's background is light: asked once, then COLORFGBG,
+    else taken as dark."""
+    if _light[0] is None:
+        found = _ask_background()
+        if found is None:
+            found = _background_from_env()
+        _light[0] = bool(found)
+    return _light[0]
 
 
 _screen_invalidator = None
@@ -280,6 +616,7 @@ def enter_alt_screen() -> None:
     sys.stdout.flush()
     _screen_cleared()
     _in_app[0] = True
+    _paint_terminal()
 
 
 def exit_alt_screen() -> None:
@@ -287,13 +624,17 @@ def exit_alt_screen() -> None:
     the cursor."""
     sys.stdout.write("\033[?25h\033[?7h\033[?1004l\033[?1049l")
     sys.stdout.flush()
+    if _screen_invalidator is not None:          # the app's screen is gone: the painter forgets it
+        with quietly():
+            _screen_invalidator()
     _in_app[0] = False
+    _paint_terminal()
 
 
 _in_app = [False]   # on the alternate screen, where everything is laid out in boxes
 
 
-def _on_app_screen() -> bool:
+def on_app_screen() -> bool:
     """Writing to the app's screen: in the app, and not to output being
     captured (a command run from its `:` line)."""
     return _in_app[0] and sys.stdout is sys.__stdout__
@@ -318,7 +659,7 @@ _toast_expiry: float = 0.0
 # Now-playing box: the playback layer registers a provider so the widget
 # layer can draw a background-audio box without importing playback (keeps the
 # dependency flowing one way). provider(width) -> list[str] | None (styled rows,
-# top to bottom; drawn just above the breadcrumb status line).
+# top to bottom; drawn just above the status line).
 _footer_provider = None
 _footer_lines_cache: list[str] = []
 # A cheap identity of the currently-shown track (file/generation/paused/index …).
@@ -440,16 +781,20 @@ def has_background_tasks() -> bool:
     return bool(BACKGROUND_TASKS)
 
 
-# 256-colour greyscale brightness ramp (dim → white → dim) for the pulsing beacon.
-_PULSE_RAMP = (238, 243, 248, 253, 255, 253, 248, 243)
+# 256-colour greys for the pulsing beacon, from faint to the most it stands out
+# and back: towards white on a dark background, towards black on a light one.
+_PULSE_RAMP = {False: (238, 243, 248, 253, 255, 253, 248, 243),
+               True: (252, 248, 244, 240, 236, 240, 244, 248)}
 
 
 def pulse_circle() -> str:
-    """A white ● whose brightness pulses over time: the beacon next to a running
+    """A ● whose brightness pulses over time: the beacon next to a running
     background activity. The status bar is re-rendered ~8 Hz while a task is
     active (see the menu idle tick), which animates this."""
-    code = _PULSE_RAMP[int(_time.time() * 6) % len(_PULSE_RAMP)]
-    return f"\033[38;5;{code}m●{Colors.RESET}"
+    if not _colour_on:
+        return "●"
+    ramp = _PULSE_RAMP[theme_is_light()]
+    return f"\033[38;5;{ramp[int(_time.time() * 6) % len(ramp)]}m●{Colors.RESET}"
 
 
 def print_inline_progress(message: str, progress: float) -> None:
@@ -459,7 +804,7 @@ def print_inline_progress(message: str, progress: float) -> None:
     like the rest of the chrome. Call `clear_inline_progress()` once the
     loop finishes. In the app (the alternate screen) it's a box over the
     middle of the screen instead, not a line wherever the cursor is."""
-    if _on_app_screen():
+    if on_app_screen():
         from backbone.prompt.core import progress_float
         progress_float(message, progress)
         return
@@ -475,9 +820,32 @@ def print_inline_progress(message: str, progress: float) -> None:
     sys.stdout.flush()
 
 
+def progress_iter(items, message: str, name=None, after: float = 0.25):
+    """Each of `items` in turn, with a progress box over the screen
+    (print_inline_progress) once going through them has taken `after`
+    seconds: a long read or write is never a screen that just sits there,
+    and a quick one never flashes a box. `name(item)` adds what it's on to
+    the message (os.path.basename, for paths). Only in the app; elsewhere
+    the items pass through untouched."""
+    items = items if hasattr(items, '__len__') else list(items)
+    total = len(items)
+    start = shown_at = _time.monotonic()
+    shown = False
+    try:
+        for i, item in enumerate(items):
+            now = _time.monotonic()
+            if total > 1 and now - start >= after and (not shown or now - shown_at >= 0.05) and on_app_screen():
+                print_inline_progress(f"{message} · {name(item)}" if name else message, i / total)
+                shown, shown_at = True, now
+            yield item
+    finally:
+        if shown:
+            clear_inline_progress()
+
+
 def clear_inline_progress() -> None:
     """Erase the line (or the box) left by `print_inline_progress()`."""
-    if _on_app_screen():
+    if on_app_screen():
         from backbone.prompt.core import screen_float_close
         screen_float_close()
         return
@@ -506,19 +874,8 @@ def show_loading(message: str) -> None:
     sys.stdout.flush()
 
 
-# A full-screen view that is its own context (a player) hides the breadcrumb
-# while it is open; toasts and background tasks still show.
-_breadcrumb_hidden = [0]
-
-
-def hide_breadcrumb(hidden: bool) -> None:
-    """Leave the menu breadcrumb off the status bar (True), or put it back
-    (False). Calls nest: each True needs its False."""
-    _breadcrumb_hidden[0] = max(0, _breadcrumb_hidden[0] + (1 if hidden else -1))
-
-
 def get_status_line() -> str:
-    """Return the current status bar content (breadcrumb + tasks + toast)."""
+    """Return the current status bar content (background tasks + toast), on the right."""
     global _toast_message
     cols = get_terminal_width()
 
@@ -536,19 +893,7 @@ def get_status_line() -> str:
     if _toast_message:
         right_parts.append(f"{Colors.DIM}{_toast_message}{Colors.RESET}")
     right = sep.join(right_parts)
-
-    crumb = _get_breadcrumb_str(cols // 2) if NAV_STACK and not _breadcrumb_hidden[0] else ""
-    left = f"  {Colors.DIM}{crumb}{Colors.RESET}" if crumb else ""
-
-    if left and right:
-        gap = max(2, cols - visual_len(left) - visual_len(right) - 2)
-        status = left + " " * gap + right + "  "
-    elif left:
-        status = left
-    elif right:                             # toasts and tasks keep to the right, crumb or none
-        status = " " * max(2, cols - visual_len(right) - 2) + right + "  "
-    else:
-        status = ""
+    status = " " * max(2, cols - visual_len(right) - 2) + right + "  " if right else ""
 
     if visual_len(status) > cols:
         status = clip_ansi(status, cols)
@@ -602,7 +947,7 @@ def tab_bar_lines() -> list[str]:
         plain = f"{k} {n}" if k and n else k or n
         key = f"{Colors.ACCENT if keys_on else Colors.DIM}{k}{Colors.RESET}" if k else ""
         if i == on and not modal:
-            name = f"{Colors.BOLD}{n}{Colors.RESET}"
+            name = f"{Colors.ACCENT2}{n}{Colors.RESET}"
         else:
             name = f"{Colors.DIM}{n}{Colors.RESET}"
         text += (key + " " + name) if k and n else (key or name)
@@ -614,10 +959,10 @@ def tab_bar_lines() -> list[str]:
     top = ""
     if _notch[0]:
         a, b = _notch[0]
-        top = " " * a + f"{Colors.DIM}╭{'─' * (b - a - 1)}╮{Colors.RESET}"
+        top = " " * a + f"{Colors.FRAME}╭{'─' * (b - a - 1)}╮{Colors.RESET}"
         mid += " " * max(0, b + 1 - visual_len(mid))          # out to its right side (the last tab's too)
-        mid = _overlay(mid, a, f"{Colors.DIM}│{Colors.RESET}")
-        mid = _overlay(mid, b, f"{Colors.DIM}│{Colors.RESET}")
+        mid = _overlay(mid, a, f"{Colors.FRAME}│{Colors.RESET}")
+        mid = _overlay(mid, b, f"{Colors.FRAME}│{Colors.RESET}")
     return [top, mid]
 
 
@@ -817,6 +1162,21 @@ def _scan(s: str):
         i += 1
 
 
+_LINE_BREAK_RE = re.compile(r'\r\n|[\r\n\v\f\x85\u2028\u2029]')
+_CONTROL_RE = re.compile(r'[\x00-\x08\x0e-\x1a\x1c-\x1f\x7f]')
+
+
+def one_line(text: str, mark: str = " ") -> str:
+    """`text` as one line for a row: each line break (Windows' \\r\\n, an old
+    Mac's \\r, \\n…) as `mark`, a tab as a space, and other control characters
+    dropped. A carriage return left in a row sends the cursor back to the
+    start of the line, and the rest of the text is drawn over the row's start.
+    Escapes are kept: they're styling, not text."""
+    if text.isprintable():
+        return text
+    return _CONTROL_RE.sub("", _LINE_BREAK_RE.sub(lambda _m: mark, text).replace("\t", " "))
+
+
 def strip_ansi(s: str) -> str:
     """`s` with every ANSI escape sequence removed."""
     if '\x1b' not in s:
@@ -890,7 +1250,17 @@ def visual_len(s: str) -> int:
         return 0
     if s.isascii() and '\x1b' not in s:
         return len(s)
-    return sum(char_cols(ch) for esc, ch in _scan(s) if not esc)
+    return _visual_len(s)
+
+
+@functools.lru_cache(maxsize=8192)
+def _visual_len(s: str) -> int:
+    """visual_len past its fast path: kept, as a frame's rows mostly repeat
+    the last frame's (box edges make nearly every row non-ASCII)."""
+    plain = strip_ansi(s)
+    if plain.isascii():
+        return len(plain)
+    return sum(char_cols(ch) for ch in plain)
 
 
 def clip_ansi(text: str, max_cols: int, reset: bool = True) -> str:
@@ -908,19 +1278,46 @@ def clip_ansi(text: str, max_cols: int, reset: bool = True) -> str:
     """
     if max_cols <= 0:
         return ""
+    if text.isascii() and '\x1b' not in text:
+        if len(text) <= max_cols:
+            return text
+        return text[:max_cols] + (Colors.RESET if reset else "")
+    return _clip_ansi(text, max_cols, reset, Colors.RESET)
+
+
+@functools.lru_cache(maxsize=8192)
+def _clip_ansi(text: str, max_cols: int, reset: bool, _reset_code: str) -> str:
+    """clip_ansi past its fast path, kept as _visual_len is (the reset code is
+    part of the key: a theme can turn it off)."""
     out: list[str] = []
     visible = 0
     truncated = False
-    for esc, chunk in _scan(text):
-        if esc:
-            out.append(chunk)
-            continue
-        w = char_cols(chunk)
-        if w and visible + w > max_cols:
-            truncated = True
+    # Text between escapes a run at a time: a run of plain ASCII is one slice,
+    # only other text is measured a character at a time.
+    pos = 0
+    for m in (*_ANSI_RE.finditer(text), None):
+        run = text[pos:m.start()] if m else text[pos:]
+        if run.isascii():
+            if visible + len(run) > max_cols:
+                out.append(run[:max_cols - visible])
+                truncated = True
+                break
+            out.append(run)
+            visible += len(run)
+        else:
+            for ch in run:
+                w = char_cols(ch)
+                if w and visible + w > max_cols:
+                    truncated = True
+                    break
+                out.append(ch)
+                visible += w
+            if truncated:
+                break
+        if m is None:
             break
-        out.append(chunk)
-        visible += w
+        out.append(m.group(0))
+        pos = m.end()
     res = "".join(out)
     if truncated and reset and not res.endswith(Colors.RESET):
         res += Colors.RESET
@@ -990,9 +1387,17 @@ def truncate_text(text: str, max_width: int, placeholder: str = "…", front: bo
     return clip_ansi(text, keep, reset=False) + placeholder
 
 
+def stand_in(word: str) -> str:
+    """`word` standing in for a value it isn't (none, varies, default, an
+    image): bracketed, so it never reads as the value itself."""
+    return f"‹{word}›"
+
+
 def plural(n: int, singular: str, many: str | None = None) -> str:
-    """``"1 result"`` / ``"156 results"``: the count and its noun, agreeing."""
-    return f"{n} {singular if abs(n) == 1 else (many or singular + 's')}"
+    """``"1 result"`` / ``"156 results"``, ``"2 matches"``: the count and its noun, agreeing."""
+    if abs(n) == 1:
+        return f"{n} {singular}"
+    return f"{n} {many or singular + ('es' if singular.endswith(('s', 'x', 'z', 'ch', 'sh')) else 's')}"
 
 
 def divider(width: int | None = None, char: str = "─") -> str:
@@ -1033,47 +1438,6 @@ def format_time(seconds: int | float) -> str:
     return base
 
 
-def _get_breadcrumb_str(width: int) -> str:
-    """Render NAV_STACK as a '>'-joined breadcrumb that fits `width`.
-
-    Over-long trails shed whole path components from the front, keeping the
-    deepest ones: those say where you are; the ones above are context you can
-    infer. Slicing the joined string by character instead turned "Bleak
-    Expectations > A Childhood Cruelly Kippered" into "…pectations > A Childhood
-    Cruelly Kippered", where the leading fragment is a word that was never in
-    the path and reads as one.
-
-    The last component is kept whatever it costs: a breadcrumb that has dropped
-    everything still has to name where you are. If it alone doesn't fit, it is
-    truncated at its own end so it starts with something real.
-    """
-    if width <= 1 or not NAV_STACK:
-        return ""
-
-    sep = " > "
-    max_length = max(0, width - 1)
-
-    if len(sep.join(NAV_STACK)) <= max_length:
-        return sep.join(NAV_STACK)
-
-    # Keep the deepest components that fit, prefixed with "… > " to show the
-    # trail was cut. Walk outward from the last one.
-    kept: list[str] = [NAV_STACK[-1]]
-    for name in reversed(NAV_STACK[:-1]):
-        if len("… > " + sep.join([name] + kept)) > max_length:
-            break
-        kept.insert(0, name)
-
-    out = "… > " + sep.join(kept)
-    if len(out) <= max_length:
-        return out
-    # Not even the deepest component fits beside the marker: truncate it from
-    # its end, so what remains is the start of a real name rather than the tail
-    # of one. truncate_text handles a width too small for the ellipsis itself.
-    return truncate_text(NAV_STACK[-1], max_length)
-
-
-
 def progress_caps(caps: bool) -> tuple[str, str]:
     """A progress bar's end caps: brackets on a bare bar, none on one in a box
     (the box already frames it)."""
@@ -1101,7 +1465,7 @@ def progress_cells(progress: float, width: int, span: tuple | None = None) -> st
     section (a chapter) to pick out: from its start to now in the accent
     colour, from now to its end dim."""
     played = round(max(0, min(1, progress)) * width)
-    cells = [(Colors.PRIMARY, "━")] * played + [(Colors.DIM, "─")] * (width - played)
+    cells = [(Colors.STRONG, "━")] * played + [(Colors.DIM, "─")] * (width - played)
     if span:
         lo = max(0, min(width - 1, int(span[0] * width)))
         hi = max(lo + 1, min(width, round(span[1] * width)))

@@ -11,16 +11,13 @@ _IS_WINDOWS = os.name == 'nt'
 # Expose module-level names so static type checkers don't consider them
 # possibly unbound when imports are platform-gated.
 msvcrt: Any | None = None
-select: Any | None = None
 termios: Any | None = None
 
 if _IS_WINDOWS:
     import msvcrt as _msvcrt
     msvcrt = _msvcrt
 else:
-    import select as _select
     import termios as _termios
-    select = _select
     termios = _termios
 
 
@@ -52,9 +49,7 @@ def get_key_non_blocking() -> str | None:
         assert msvcrt is not None
         if not msvcrt.kbhit():
             return None
-    else:
-        assert select is not None
-        if not select.select([sys.stdin.fileno()], [], [], 0)[0]:
-            return None
-    from backbone.prompt.core import _read_key_raw
-    return _read_key_raw(sys.stdin.fileno()) or None
+        from backbone.prompt.core import _read_key_raw
+        return _read_key_raw(sys.stdin.fileno()) or None
+    from backbone.prompt.core import _poll_key
+    return _poll_key(sys.stdin.fileno())

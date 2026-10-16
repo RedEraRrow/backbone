@@ -57,6 +57,23 @@ class PrintInlineProgressTest(unittest.TestCase):
         self.assertEqual(buf.getvalue(), "\r\033[K")
 
 
+class OneLineTest(unittest.TestCase):
+    """A row is one line: a value with line breaks (Windows' \\r\\n among
+    them) never sends the cursor back over the row's start."""
+
+    def test_every_kind_of_line_break_becomes_the_mark(self):
+        self.assertEqual(ui.one_line("way\r\nJust\rso\nend", "\\"), "way\\Just\\so\\end")
+        self.assertEqual(ui.one_line("a\tb\x07c"), "a bc")
+        self.assertEqual(ui.one_line("\x1b[1mbold\x1b[0m"), "\x1b[1mbold\x1b[0m")   # styling kept
+
+    def test_a_table_cell_holds_no_carriage_return(self):
+        from backbone.prompt import core
+        for cell in ("way\r\nJust", [("way\r\n", 'primary'), "Just"], ("way\r\nJust", 'dim')):
+            text = core._render_cell_segments(cell, 'normal', False, 40, 'left')
+            self.assertNotIn("\r", text)
+            self.assertNotIn("\n", text)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -83,23 +100,17 @@ class ProgressBarSpanTest(unittest.TestCase):
         self.assertNotIn(ui.Colors.ACCENT, ui.get_progress_bar(0.5, 20))
 
 
-class BreadcrumbHiddenTest(unittest.TestCase):
-    def test_a_full_screen_view_hides_it_and_gives_it_back(self):
-        from backbone.nav import NAV_STACK
-        NAV_STACK[:] = ['Browse', 'A Quiet Night Out']
-        try:
-            with patch.object(ui, 'get_terminal_width', return_value=80):
-                self.assertIn('A Quiet Night Out', ui.get_status_line())
-                ui.hide_breadcrumb(True)
-                self.assertNotIn('A Quiet Night Out', ui.get_status_line())
-                ui.show_status("Volume: 80%")
+class StatusLineTest(unittest.TestCase):
+    def test_a_message_sits_at_the_right_with_nothing_on_the_left(self):
+        ui._toast_message = ""
+        with patch.object(ui, 'get_terminal_width', return_value=80):
+            self.assertEqual(ui.get_status_line(), "")
+            ui.show_status("Volume: 80%")
+            try:
                 line = ui.strip_ansi(ui.get_status_line())
                 self.assertTrue(line.rstrip().endswith("Volume: 80%") and line.startswith(" " * 40), line)
+            finally:
                 ui._toast_message = ""
-                ui.hide_breadcrumb(False)
-                self.assertIn('A Quiet Night Out', ui.get_status_line())
-        finally:
-            NAV_STACK[:] = []
 
 
 class MarqueeTest(unittest.TestCase):

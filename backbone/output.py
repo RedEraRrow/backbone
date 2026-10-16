@@ -105,7 +105,7 @@ def human_value(value) -> str:
     if isinstance(value, bool):
         return 'true' if value else 'false'
     if isinstance(value, list):
-        return ', '.join(str(v) for v in value) or '(none)'
+        return ', '.join(str(v) for v in value) or ui.stand_in('none')
     if isinstance(value, dict):
         return f"({len(value)} entries)"
     return str(value)
@@ -179,9 +179,9 @@ def fail(code: int, message: str, **context) -> int:
             'code': code_name(code), 'message': message, 'context': context}})
         sys.stderr.write(json.dumps(body) + "\n")
     else:
-        accent, reset = ui.Colors.ACCENT, ui.Colors.RESET
+        error, reset = ui.Colors.ERROR, ui.Colors.RESET
         detail = ''.join(f"\n  {k}: {v}" for k, v in context.items())
-        sys.stderr.write(f"{accent}✘{reset} {message}{detail}\n")
+        sys.stderr.write(f"{error}✘{reset} {message}{detail}\n")
     sys.stderr.flush()
     return code
 
