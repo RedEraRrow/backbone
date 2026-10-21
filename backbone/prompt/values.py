@@ -9,7 +9,7 @@ from backbone import keys, ui
 from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _with_toggle_hint, boxed_chrome, consume_chrome, disable_mouse, enable_mouse
-from backbone.prompt.core import C, edit_line
+from backbone.prompt.core import C, clicked_field, edit_line, field_row_spans, framed_col
 from backbone.prompt.text import field_frame
 
 
@@ -78,9 +78,13 @@ def fraction_edit(message: str = "Edit metadata pair:",
         return lines
 
     def _render():
-        field = [f"  {C.DIM}{label}{C.RESET} {_shown('current')}   {C.DIM}of{C.RESET} {_shown('total')}"]
+        pieces = [(None, f"{C.DIM}{label}{C.RESET} "), (buffers['current'], _shown('current')),
+                  (None, f"   {C.DIM}of{C.RESET} "), (buffers['total'], _shown('total'))]
+        field = ["  " + "".join(drawn for _b, drawn in pieces)]
+        field_row_spans((w.row or 1) + ui.top_margin() + 1, framed_col(), pieces)   # field_frame's second line
         # No q: these fields take text, so q is a letter here.
-        pairs = _with_toggle_hint([("tab/⇧tab", "field"), ("↵", "save"), ("esc", "back")])
+        pairs = _with_toggle_hint([(keys.label("field.next", "field.prev"), "field"), (keys.label("field.submit"), "save"),
+                                   (keys.label("field.cancel"), "back")])
         w.render(field_frame(message, field, _guide(), pairs, _hint_cells))
 
     result = None
@@ -113,14 +117,15 @@ def fraction_edit(message: str = "Edit metadata pair:",
             if chrome.is_mode_toggle(key):
                 return MODE_TOGGLE  # type: ignore[return-value]
             field = order[at]
-            if key == 'ENTER':
+            if keys.pressed(key, 'field.submit'):
                 result = _frac_result(buffers, varies)
                 break
-            elif key in ('ESC', 'CTRL_C'):      # Ctrl-C cancels, as in every widget
+            elif key == 'CTRL_C' or keys.pressed(key, 'field.cancel'):   # Ctrl-C cancels, as in every widget
                 break
-            elif key in ('TAB', 'BACKTAB'):
-                # Shift+Tab is Tab in reverse, on every screen that has fields.
-                at = (at + (-1 if key == 'BACKTAB' else 1)) % len(order)
+            elif keys.pressed(key, 'field.next') or keys.pressed(key, 'field.prev'):
+                at = (at + (-1 if keys.pressed(key, 'field.prev') else 1)) % len(order)
+            elif hit := clicked_field(key, {f: buffers[f] for f in order}):
+                at, positions[hit[0]] = order.index(hit[0]), hit[1]
             elif (new_pos := edit_line(buffers[field], positions[field], key)) is not None:
                 positions[field] = new_pos
 
@@ -194,29 +199,17 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
     def _render():
         lines = []
 
-        row = "  "
+        pieces = []
         for i, field in enumerate(field_order):
             value = "".join(fields[field])
             pos = positions[field]
-
-            if i == cursor_field:
-                display = block_cursor(value, pos)
-            else:
-                display = value.ljust(field_maxlen[field], '0')
-
-            row += display
-
-            if i == 0:
-                row += ":"
-            elif i == 1:
-                row += ":"
-            elif i == 2:
-                row += "."
-
-        lines.append(row)
+            display = block_cursor(value, pos) if i == cursor_field else value.ljust(field_maxlen[field], '0')
+            pieces += [(fields[field], display), (None, ":" if i < 2 else "." if i == 2 else "")]
+        lines.append("  " + "".join(drawn for _b, drawn in pieces))
+        field_row_spans((w.row or 1) + ui.top_margin() + 1, framed_col(), pieces)   # boxed_chrome's second line
         lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(
-            [('↵', 'save'), ('tab/⇧tab', 'field'),
-             ('esc', 'back'), (keys.label('list.quit'), 'quit app')]), _hint_cells)
+            [(keys.label('field.submit'), 'save'), (keys.label('field.next', 'field.prev'), 'field'),
+             (keys.label('field.cancel'), 'back'), (keys.label('list.quit'), 'quit app')]), _hint_cells)
         w.render(lines)
 
     result = None
@@ -253,7 +246,7 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
             pos = positions[current_field]
             max_len = field_maxlen[current_field]
 
-            if key == 'ENTER':
+            if keys.pressed(key, 'field.submit'):
                 if _validate_time():
                     h = "".join(fields['hours']).zfill(2)
                     m = "".join(fields['minutes']).zfill(2)
@@ -263,29 +256,17 @@ def time_edit(message: str = "Edit time:", initial: str = "00:00:00") -> str | N
                     break
                 else:
                     ui.show_status("Hours go up to 23, minutes and seconds up to 59.")
-            elif key in ('ESC', 'CTRL_C'):      # Ctrl-C cancels, as in every widget
+            elif key == 'CTRL_C' or keys.pressed(key, 'field.cancel'):   # Ctrl-C cancels, as in every widget
                 break
             elif keys.pressed(key, 'list.quit'):
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
-            elif key in ('TAB', 'BACKTAB'):
-                # Shift+Tab is Tab in reverse, on every screen that has fields.
-                _step = -1 if key == 'BACKTAB' else 1
+            elif keys.pressed(key, 'field.next') or keys.pressed(key, 'field.prev'):
+                _step = -1 if keys.pressed(key, 'field.prev') else 1
                 cursor_field = (cursor_field + _step) % len(field_order)
-            elif key == 'BACKSPACE':
-                if pos > 0:
-                    buf.pop(pos - 1)
-                    positions[current_field] = pos - 1
-            elif key == 'DELETE':
-                if pos < len(buf):
-                    buf.pop(pos)
-            elif key == 'LEFT':
-                positions[current_field] = max(0, pos - 1)
-            elif key == 'RIGHT':
-                positions[current_field] = min(len(buf), pos + 1)
-            elif key == 'HOME':
-                positions[current_field] = 0
-            elif key == 'END':
-                positions[current_field] = len(buf)
+            elif hit := clicked_field(key, fields):
+                cursor_field, positions[hit[0]] = field_order.index(hit[0]), hit[1]
+            elif keys.action(key, 'text'):                   # the caret and deleting: edit_line's
+                positions[current_field] = edit_line(buf, pos, key)
             elif key.isdigit() and len(buf) < max_len:
                 buf.insert(pos, key)
                 positions[current_field] = pos + 1
@@ -339,8 +320,9 @@ def number_edit(message: str = "Edit number:", *, value: int = 0,
             f"  {C.ACCENT}›{C.RESET} {C.BOLD}{shown}{C.RESET}{C.DIM}{unit_s}{C.RESET}   {C.DIM}({bounds}){C.RESET}",
         ]
         lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(
-            [("↑↓", "±1"), ("⇞⇟", "±10"),
-             ("↵", "save"), ("esc", "back"), (keys.label("list.quit"), "quit app")]),
+            [(keys.label("field.up", "field.down"), "±1"), (keys.label("field.page_up", "field.page_down"), "±10"),
+             (keys.label("field.submit"), "save"), (keys.label("field.cancel"), "back"),
+             (keys.label("list.quit"), "quit app")]),
                       _hint_cells, help_key=True)
         w.render(lines)
 
@@ -373,27 +355,27 @@ def number_edit(message: str = "Edit number:", *, value: int = 0,
                 return MODE_TOGGLE
             if key == 'CTRL_C':
                 result = None; break
-            elif key == 'ENTER':
+            elif keys.pressed(key, 'field.submit'):
                 result = _cur(); break
-            elif key == 'ESC':
+            elif keys.pressed(key, 'field.cancel'):
                 result = None; break
             elif keys.pressed(key, 'list.quit'):
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
             elif key.isdigit():
                 if len("".join(buf)) < 12:
                     buf.append(key); _render()
-            elif key == 'BACKSPACE':
+            elif keys.pressed(key, 'text.backspace'):
                 if buf:
                     buf.pop(); _render()
-            elif key == 'UP':
+            elif keys.pressed(key, 'field.up'):
                 value = _clamp(_cur() + 1); buf.clear(); _render()
-            elif key == 'DOWN':
+            elif keys.pressed(key, 'field.down'):
                 value = _clamp(_cur() - 1); buf.clear(); _render()
-            elif key == 'PGUP':
+            elif keys.pressed(key, 'field.page_up'):
                 value = _clamp(_cur() + 10); buf.clear(); _render()
-            elif key == 'PGDN':
+            elif keys.pressed(key, 'field.page_down'):
                 value = _clamp(_cur() - 10); buf.clear(); _render()
-            elif key == 'HOME':
+            elif keys.pressed(key, 'field.lowest'):
                 value = minimum; buf.clear(); _render()
     finally:
         disable_mouse()
@@ -401,6 +383,15 @@ def number_edit(message: str = "Edit number:", *, value: int = 0,
         w.clear()
 
     return result
+
+
+def _more(key: str) -> bool:
+    """A star or a count up: a value up, or the caret's right."""
+    return keys.pressed(key, 'field.up') or keys.pressed(key, 'text.right')
+
+
+def _less(key: str) -> bool:
+    return keys.pressed(key, 'field.down') or keys.pressed(key, 'text.left')
 
 
 def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
@@ -456,9 +447,12 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
         ]
         # The keys of the focused row: stars, the play count, or (the Rater's
         # e-mail) just typing, where q is a letter, not quit.
-        pairs = [("tab/⇧tab", "field")]
-        pairs += {0: [("←→", "stars")], 1: [("←→", "±1"), ("⇞⇟", "±10")]}.get(field, [])
-        pairs += [("↵", "save"), ("esc", "back")] + ([(keys.label("list.quit"), "quit app")] if field != 2 else [])
+        pairs = [(keys.label("field.next", "field.prev"), "field")]
+        pairs += {0: [(keys.label("text.left", "text.right"), "stars")],
+                  1: [(keys.label("text.left", "text.right"), "±1"),
+                      (keys.label("field.page_up", "field.page_down"), "±10")]}.get(field, [])
+        pairs += [(keys.label("field.submit"), "save"), (keys.label("field.cancel"), "back")]
+        pairs += [(keys.label("list.quit"), "quit app")] if field != 2 else []
         lines, _dx = boxed_chrome(lines, message, pairs, _hint_cells)
         w.render(lines)
 
@@ -489,41 +483,41 @@ def rating_edit(message: str = "Rating:", *, stars: int = 0, count: int = 0,
                 key = _ch
             if key == 'CTRL_C':
                 result = None; break
-            elif key == 'ENTER':
+            elif keys.pressed(key, 'field.submit'):
                 result = {'stars': stars, 'count': _count(), 'email': email}; break
-            elif key == 'ESC':
+            elif keys.pressed(key, 'field.cancel'):
                 result = None; break
-            elif key in ('TAB', 'BACKTAB'):
+            elif keys.pressed(key, 'field.next') or keys.pressed(key, 'field.prev'):
                 count = _count(); cbuf.clear()
-                field = (field + (-1 if key == 'BACKTAB' else 1)) % 3
+                field = (field + (-1 if keys.pressed(key, 'field.prev') else 1)) % 3
                 _render()
             # 'q' quits only outside the free-text Rater field (an email may contain 'q').
             elif keys.pressed(key, 'list.quit') and field != 2:   # field 2 is the e-mail text
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
             elif field == 0:
-                if key in ('LEFT', 'DOWN'):
+                if _less(key):
                     stars = max(0, stars - 1); _render()
-                elif key in ('RIGHT', 'UP'):
+                elif _more(key):
                     stars = min(5, stars + 1); _render()
                 elif key.isdigit() and 0 <= int(key) <= 5:
                     stars = int(key); _render()
             elif field == 1:
-                if key in ('UP', 'RIGHT'):
+                if _more(key):
                     count = _count() + 1; cbuf.clear(); _render()
-                elif key in ('DOWN', 'LEFT'):
+                elif _less(key):
                     count = max(0, _count() - 1); cbuf.clear(); _render()
-                elif key == 'PGUP':
+                elif keys.pressed(key, 'field.page_up'):
                     count = _count() + 10; cbuf.clear(); _render()
-                elif key == 'PGDN':
+                elif keys.pressed(key, 'field.page_down'):
                     count = max(0, _count() - 10); cbuf.clear(); _render()
                 elif key.isdigit():
                     if len("".join(cbuf)) < 12:
                         cbuf.append(key); _render()
-                elif key == 'BACKSPACE':
+                elif keys.pressed(key, 'text.backspace'):
                     if cbuf:
                         cbuf.pop(); _render()
             elif field == 2:
-                if key == 'BACKSPACE':
+                if keys.pressed(key, 'text.backspace'):
                     email = email[:-1]; _render()
                 elif len(key) == 1 and key.isprintable():
                     email += key; _render()

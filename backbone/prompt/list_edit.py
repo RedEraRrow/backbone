@@ -20,7 +20,7 @@ from backbone.prompt.chrome import (
 from backbone.prompt.lists import confirm
 from backbone.prompt.text import multiline, path
 from backbone.prompt.core import C
-from backbone.prompt.core import edit_line
+from backbone.prompt.core import caret_spans, caret_window, edit_line, framed_col
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +123,15 @@ def _row_values(item, num_cols: int) -> list:
 
 
 def table_lines(headers: tuple, rows: list, width: int, *, cursor: int | None = None,
-                mins: tuple | None = None, first: int = 0, count: int | None = None) -> list[str]:
+                mins: tuple | None = None, first: int = 0, count: int | None = None,
+                layout: dict | None = None) -> list[str]:
     """`rows` (each a list of cells: text, or styled segments) as a ruled
     grid `width` wide: the headings over a rule, the columns divided, each
     as wide as what's in it (`mins`: at least) and the last taking the rest,
     row `cursor` on the bar. Shows rows[first:first + count], laid out by
     them all, so the columns hold still as it scrolls. What the table editor
-    shows, and anything showing such a table (a tag's people)."""
+    shows, and anything showing such a table (a tag's people). `layout`
+    gets each column's 'starts' (its offset in a line) and 'widths'."""
     n = len(headers)
     mins = list(mins or ()) + [0] * n
     columns = [Column(style='primary', min_width=mins[j], gap=1 if j == 0 else 3, flex=j == n - 1)
@@ -137,6 +139,8 @@ def table_lines(headers: tuple, rows: list, width: int, *, cursor: int | None = 
     widths = [max(0, w) for w in _table_widths([list(headers)] + rows, columns, width, pointer_w=0, right_margin=1)]
     widths[-1] += max(0, width - sum(widths) - 2 * n - (n - 1))        # the last column to the edge
     div = f"{C.FRAME}│{C.RESET}"
+    if layout is not None:
+        layout.update(widths=widths, starts=[1 + sum(w + 3 for w in widths[:j]) for j in range(n)])
 
     def line(cells: list, current: bool = False) -> str:
         return " " + f" {div} ".join(
@@ -152,7 +156,8 @@ def table_lines(headers: tuple, rows: list, width: int, *, cursor: int | None = 
 
 def _build_list_edit_lines(message: str, items: list, headers: tuple, cursor: int, viewport: int,
                            editing: tuple | None, pairs: list, cells: dict, note: str = "",
-                           col_mins: tuple | None = None, col_types: dict | None = None, can_add: bool = True):
+                           col_mins: tuple | None = None, col_types: dict | None = None, can_add: bool = True,
+                           layout: dict | None = None):
     """The table editor's frame: the rows as a ruled grid (table_lines), the
     highlighted one on the bar, in a box titled `message` down to the hint
     bar. `editing` is the highlighted row's cell under edit, (column, its
@@ -184,7 +189,7 @@ def _build_list_edit_lines(message: str, items: list, headers: tuple, cursor: in
     viewport = max(0, min(viewport, n - vis))   # see select(): no scrolled-off rows once they fit
 
     grid = table_lines(headers, [shown(i) for i in range(n)], inner, cursor=cursor, mins=tuple(mins),
-                       first=viewport, count=vis)
+                       first=viewport, count=vis, layout=layout)
     body = top + [" " * ui.MARGIN_H + ln for ln in grid]
     if not n:
         body.append(f"   {C.DIM}No rows yet · {keys.label('table.add')} adds one{C.RESET}" if can_add
@@ -346,13 +351,14 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
     def _pairs() -> list:
         L = keys.label
         if edit_mode:
+            cell = (L("field.next", "field.prev"), "cell")
             if barrel_mode:
-                pairs = [("↑↓", "choose"), ("tab/⇧tab", "cell")]
+                pairs = [(L("field.up", "field.down"), "choose"), cell]
             elif _is_ts(edit_col):
-                pairs = [("←→", "move"), ("tab/⇧tab", "cell")]
+                pairs = [(L("text.left", "text.right"), "move"), cell]
             else:
-                pairs = [("tab/⇧tab", "cell")]
-            return pairs + [("↵", "set"), ("esc", "cancel")]
+                pairs = [cell]
+            return pairs + [(L("field.submit"), "set"), (L("field.cancel"), "cancel")]
         pairs = [(L("list.up", "list.down"), "move")]
         if not fixed_rows:
             pairs.append((L("table.add"), "add"))
@@ -372,10 +378,18 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
 
     def _render():
         nonlocal viewport, _vis, _first_line
+        layout: dict = {}
         lines, viewport, _vis, _first_line = _build_list_edit_lines(
             message, items, headers, cursor, viewport, _editing(), _pairs(), _hint_cells,
-            note, col_mins, col_types, can_add=not fixed_rows)
+            note, col_mins, col_types, can_add=not fixed_rows, layout=layout)
         w.render(lines)
+        if edit_mode and not barrel_mode and not _is_ts(edit_col) and layout:
+            # Where the cell's text is, as far as it shows (scrolled to its caret).
+            width = layout['widths'][edit_col]
+            text = "".join(edit_buf)
+            start = caret_window(len(text) + (edit_pos >= len(text)), edit_pos, width)
+            caret_spans(edit_buf, [(ui.top_margin() + 1 + _first_line + cursor - viewport,
+                                    framed_col() + layout['starts'][edit_col], start, text[start:start + width])])
 
     result = None
     _last_click: int | None = None
@@ -413,19 +427,20 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                 return MODE_TOGGLE  # type: ignore[return-value]
 
             if edit_mode:
-                if key == 'ESC':
+                act, typing = keys.action(key, 'field'), keys.action(key, 'text')
+                if act == 'field.cancel':
                     items[cursor] = edit_backup
                     edit_mode = False
-                elif key == 'ENTER':
+                elif act == 'field.submit':
                     _commit()
                     edit_mode = False
-                elif key in ('TAB', 'BACKTAB'):
+                elif act in ('field.next', 'field.prev'):
                     if num_cols > 1:
                         _commit()
-                        _open_cell(_next_col(-1 if key == 'BACKTAB' else 1))
+                        _open_cell(_next_col(-1 if act == 'field.prev' else 1))
                 elif barrel_mode:
-                    if key in ('UP', 'DOWN'):
-                        barrel_idx = (barrel_idx + (-1 if key == 'UP' else 1)) % len(barrel_hints)
+                    if act in ('field.up', 'field.down'):
+                        barrel_idx = (barrel_idx + (-1 if act == 'field.up' else 1)) % len(barrel_hints)
                     elif len(key) == 1 and key.isprintable():
                         barrel_mode = False                  # typing: the cell's a text field again
                         edit_buf, edit_pos = [key], 1
@@ -433,22 +448,22 @@ def list_edit(message: str, initial_items: list | None = None, headers: tuple[st
                     # Only digits go in, and the caret walks the whole mask, so
                     # running off the end of one part lands in the next. Anything
                     # else isn't taken: the mask has every separator already.
-                    if key in ('LEFT', 'RIGHT'):
-                        edit_pos = _ts_step(edit_pos, -1 if key == 'LEFT' else 1)
-                    elif key in ('HOME', 'END'):
-                        edit_pos = _TS_SLOTS[0 if key == 'HOME' else -1]
-                    elif key == 'BACKSPACE':
+                    if typing in ('text.left', 'text.right'):
+                        edit_pos = _ts_step(edit_pos, -1 if typing == 'text.left' else 1)
+                    elif typing in ('text.home', 'text.end'):
+                        edit_pos = _TS_SLOTS[0 if typing == 'text.home' else -1]
+                    elif typing == 'text.backspace':
                         # Clear the slot behind the caret and sit on it, so holding
                         # backspace rubs the stamp out right to left.
                         prev = _ts_step(edit_pos, -1)
                         edit_buf[prev] = _TS_MASK[prev]
                         edit_pos = prev
-                    elif key == 'DELETE':
+                    elif typing == 'text.delete':
                         edit_buf[edit_pos] = _TS_MASK[edit_pos]
                     elif len(key) == 1 and key.isdigit():
                         edit_buf[edit_pos] = key
                         edit_pos = _ts_step(edit_pos, 1)
-                elif key == 'BACKSPACE' and edit_pos == 0 and len(barrel_hints) >= 2:
+                elif typing == 'text.backspace' and edit_pos == 0 and len(barrel_hints) >= 2:
                     barrel_mode, barrel_idx = True, 0      # back to the choices
                 elif (new_pos := edit_line(edit_buf, edit_pos, key)) is not None:
                     edit_pos = new_pos

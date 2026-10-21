@@ -4,7 +4,7 @@ audio, and the shared chrome."""
 from backbone.prompt.core import (  # noqa: F401
     Choice, Column, JumpTo, Pane, PanelTitle, Preview, Trail, box_fits, box_lines, separator, HINTS_CLICK, add_help_corner, add_hint_click_cells,
     help_corner_text, path_box, help_toggle_shown, help_toggle_width, hints_visible, is_hints_key, place_help_toggle, rounded_header,
-    set_help_toggle_shown, toggle_hints, columns_shown, set_columns_shown,
+    set_help_toggle_shown, toggle_hints, columns_shown, set_columns_shown, preview_shown, set_preview_shown,
 )
 from backbone.prompt.chrome import (  # noqa: F401
     CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, move_hint,

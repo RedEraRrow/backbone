@@ -20,6 +20,14 @@ keys.define("global", "Everywhere", [
     ("prev", ("\x02",), "previous track"),
     ("player", ("\x0f",), "open the player"),
     ("raw_text", ("\x14",), "switch a value between its editor and raw text"),
+    ("command_line", (":",), "the command line, on screens that leave it free"),
+], within=())
+# Moving between the app's tabs, from any screen: the next and previous (on
+# screens whose own keys leave them free) and each by its number.
+keys.define("tabs", "Tabs", [
+    ("next", ("TAB",), "next tab"),
+    ("prev", ("BACKTAB",), "previous tab"),
+    *((f"tab_{n}", (f"F{n}",), f"tab {n}") for n in range(1, 10)),
 ], within=())
 # The volume, on any screen that leaves these keys free (a list, the player,
 # the miniplayer; not a text field, where they're typed). Its own group, so a
@@ -230,20 +238,20 @@ def consume_chrome(key: str, cells: dict, free_keys: bool = False):
         # background track change went by), so repaint everything.
         screen_invalidate()
         return CHROME_REDRAW
-    if free_keys and key == ':' and (opened := open_command_line()) is not None:
+    if free_keys and keys.pressed(key, 'global.command_line') and (opened := open_command_line()) is not None:
         if not opened:                       # just the overlay, put back: only the toast is new
             render_status_bar()
             return CHROME_HANDLED
         screen_invalidate()
         if not _IS_WINDOWS:
-            sys.stdout.write("\033[?1000h\033[?1006h")
+            enable_mouse()
         return CHROME_REDRAW
     tab = nav.tab_for(key, free_keys)
     if tab is not None:
         nav.switch_to(tab)              # back here once this tab shows again
         screen_invalidate()
         if not _IS_WINDOWS:
-            sys.stdout.write("\033[?1000h\033[?1006h")   # the other tab may have had the mouse off
+            enable_mouse()   # the other tab may have had the mouse off
         return CHROME_REDRAW
     if is_hints_key(key, bool(cells.get('__help_key__'))):
         toggle_hints()
@@ -252,7 +260,7 @@ def consume_chrome(key: str, cells: dict, free_keys: bool = False):
     if act == "global.player" and _player_opener is not None:
         _player_opener()
         if not _IS_WINDOWS:
-            sys.stdout.write("\033[?1000h\033[?1006h")   # the player took the mouse
+            enable_mouse()   # the player took the mouse
         sys.stdout.flush()
         return CHROME_REDRAW
     if act in ("global.playpause", "global.next", "global.prev") and _transport_handler is not None:
@@ -274,7 +282,7 @@ def consume_chrome(key: str, cells: dict, free_keys: bool = False):
         if act == 'open' and _player_opener is not None:
             _player_opener()
             if not _IS_WINDOWS:
-                sys.stdout.write("\033[?1000h\033[?1006h")
+                enable_mouse()
             sys.stdout.flush()
             return CHROME_REDRAW
         if act in FOOTER_ACTIONS and _transport_handler is not None:

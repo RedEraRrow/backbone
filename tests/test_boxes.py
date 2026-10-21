@@ -181,7 +181,7 @@ class ColumnBrowserTest(unittest.TestCase):
         def preview(value):
             seen.append(value)
             return prompt.Preview(lambda w, h: [f"P{value}"], "Holds", [f"C{value}"], want=12)
-        with patch.object(core, '_columns_on', [True]):
+        with patch.dict(core._shown, columns=True, preview=True):
             res, frame = _select(cols, rows, list(keys), choices=self.CHOICES, header=prompt.PanelTitle("Main"),
                                  trail=trail, preview=preview)
         return res, frame, seen
@@ -217,17 +217,32 @@ class ColumnBrowserTest(unittest.TestCase):
         self.assertEqual(len(shown), 2)
         self.assertTrue(pw and not strip)
         self.assertEqual(shown[1][1], 10)                                  # "Album 8" and its room
-        self.assertGreater(core.column_widths(160, self.TRAIL, pv, want=40, list_want=100)[1],
-                           core.column_widths(160, self.TRAIL, pv, list_want=100)[1])
+        self.assertGreater(core.column_widths(160, self.TRAIL, pv, want=40, list_want=40)[1],
+                           core.column_widths(160, self.TRAIL, pv, list_want=40)[1])
 
-    def test_spare_room_is_shared_and_levels_narrow_before_going(self):
+    def test_spare_room_is_shared(self):
         pv = prompt.Preview(lambda w, h: [], want=10)
         _shown, pw, _strip = core.column_widths(200, self.TRAIL, pv, list_want=20)
         self.assertEqual(pw, 200 * core._COL_PREVIEW[1] // 100)            # a short list: the preview its share
-        self.assertGreater(core.column_widths(200, self.TRAIL, pv, list_want=150)[1], core._COL_PREVIEW[0])
+        self.assertEqual(core.column_widths(200, self.TRAIL, pv, list_want=150)[1], core._COL_PREVIEW[0])   # a wide list first
         shown, pw, strip = core.column_widths(50, self.TRAIL, pv, list_want=10)
         self.assertTrue(strip and shown)                                    # the preview under; a level kept
-        self.assertEqual(shown[-1][1], core._COL_TRAIL[0]) if len(shown) > 1 else None
+
+    def test_the_deepest_is_the_widest_and_a_level_goes_rather_than_being_cut(self):
+        long = [prompt.Trail(["Library", "Artists"], [0, 1], 0, 0),
+                prompt.Trail(["Godspeed You! Black Emperor"], [0], 0, 1),
+                prompt.Trail(["Lift Your Skinny Fists Like Antennas to Heaven"], [0], 0, 2)]
+        pv = prompt.Preview(lambda w, h: [], want=30)
+        for total in range(60, 300, 7):
+            for list_want in (8, 30, 70):
+                shown, pw, _strip = core.column_widths(total, long, pv, list_want=list_want)
+                widths = [tw for _t, tw in shown]
+                main = total - (pw + ui.MARGIN_H if pw else 0) - 4 - sum(tw + 3 for tw in widths)
+                self.assertEqual(widths + [main], sorted(widths + [main]), (total, list_want))
+                for t, tw in shown:                                         # two thirds of it, or _COL_TRAIL[1]
+                    self.assertGreaterEqual(tw, min((len(t.labels[0]) + 3) * 2 // 3, core._COL_TRAIL[1]) if t.depth else 0)
+        shown, _pw, _strip = core.column_widths(260, long, pv, list_want=8)
+        self.assertEqual(shown[-1][1], len(long[-1].labels[0]) + 3)        # room: an album's name whole
 
     def test_the_strip_takes_what_the_list_leaves(self):
         self.assertEqual(core.strip_rows(30, 5, 40), 30 - 9)                # a short list: the rest
@@ -240,7 +255,7 @@ class ColumnBrowserTest(unittest.TestCase):
             return prompt.Preview(lambda w, h: [f"P{value}"], "Holds", ["x"] * value, want=8 * value)
         shapes = []
         for keys in (['ESC'], ['DOWN', 'DOWN', 'ESC'], ['DOWN', 'DOWN', 'DOWN', 'DOWN', 'ESC']):
-            with patch.object(core, '_columns_on', [True]):
+            with patch.dict(core._shown, columns=True, preview=True):
                 _res, frame = _select(200, 30, keys, choices=self.CHOICES, header=prompt.PanelTitle("Main"),
                                       trail=self.TRAIL, preview=preview)
             top = next(line for line in frame if "╭" in line)
@@ -280,10 +295,20 @@ class ColumnBrowserTest(unittest.TestCase):
                                 'ESC'])[0]
         self.assertIsNone(res)                                              # the preview does nothing
 
-    def test_v_turns_it_off(self):
-        with patch.object(lists, "set_columns_shown", lambda on: core._columns_on.__setitem__(0, on)):
-            _res, frame, _seen = self._frame(200, ['v', 'ESC'])
-        self.assertFalse(any("Album 4" in line or "P1" in line for line in frame))
+    def _toggled(self, key):
+        with patch.object(lists, "set_columns_shown", lambda on: core._shown.__setitem__("columns", on)), \
+             patch.object(lists, "set_preview_shown", lambda on: core._shown.__setitem__("preview", on)):
+            return self._frame(200, [key, 'ESC'])[1]
+
+    def test_v_turns_the_levels_off_and_keeps_the_preview(self):
+        frame = self._toggled('v')
+        self.assertFalse(any("Album 4" in line for line in frame))
+        self.assertTrue(any("P1" in line for line in frame))
+
+    def test_i_turns_the_preview_off_and_keeps_the_levels(self):
+        frame = self._toggled('i')
+        self.assertFalse(any("P1" in line for line in frame))
+        self.assertTrue(any("Album 4" in line for line in frame))
 
 
 class PictureTest(unittest.TestCase):

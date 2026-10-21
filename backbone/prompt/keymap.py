@@ -52,12 +52,12 @@ def _capture(what: str) -> str | None:
     ui.clear_screen()
     pad = " " * ui.MARGIN_H
     sys.stdout.write(f"\n{pad}{C.BOLD}Press the new key for: {what}{C.RESET}\n"
-                     f"{pad}{C.DIM}esc cancels{C.RESET}\n")
+                     f"{pad}{C.DIM}{keys.label('field.cancel')} cancels{C.RESET}\n")
     sys.stdout.flush()
     with raw_mode(sys.stdin):
         while True:
             key = _read_key(sys.stdin.fileno())
-            if key == 'ESC':
+            if keys.pressed(key, 'field.cancel'):
                 return None
             if keys.bindable(key):
                 return key
@@ -132,7 +132,7 @@ def keys_editor(scopes: list | None = None) -> None:
         choice = select("", _choices(scopes), columns=_COLUMNS, place=place,
                         header=lambda: rounded_header("Key bindings", "",
                                                       f"{changed} changed" if changed else "all default"),
-                        extra_hints={"↵": "add a key"},
+                        extra_hints={keys.label("list.choose", first=True): "add a key"},
                         row_actions=row_actions, row_action_hints=hints)
         if choice is None:
             return

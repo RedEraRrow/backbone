@@ -134,6 +134,20 @@ class Colors:
     SHOW = "\033[?25h"
 
 
+def _italic_code() -> str:
+    """Italic where the terminal's terminfo says it has it (sitm), else
+    underline, the typewriter's stand-in for it."""
+    try:
+        import curses
+        curses.setupterm(os.environ.get("TERM") or "dumb", sys.__stdout__.fileno())
+        return "\033[3m" if curses.tigetstr("sitm") else Colors.UNDERLINE
+    except Exception:                       # no terminfo (Windows): its terminals have italics
+        return "\033[3m"
+
+
+Colors.ITALIC = _italic_code()
+
+
 ROLES = ('ACCENT', 'ACCENT2', 'STRONG', 'OK', 'WARN', 'ERROR', 'INFO', 'NOTE', 'MUTED', 'FRAME', 'HEADING',
          'GROUP', 'BAR', 'BAR_DIM')
 

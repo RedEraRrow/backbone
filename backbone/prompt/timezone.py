@@ -1468,7 +1468,7 @@ def timezone_select(initial_offset: str = "") -> str | None:
                 else:
                     break
 
-            elif key == 'BACKSPACE':
+            elif keys.pressed(key, 'text.backspace'):
                 if search_str:
                     search_str = search_str[:-1]
                     _render()

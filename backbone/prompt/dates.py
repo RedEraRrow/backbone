@@ -14,7 +14,7 @@ from backbone.nav import QuitToTerminal
 from backbone.prompt import chrome
 from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, _with_toggle_hint, boxed_chrome, consume_chrome, disable_mouse, enable_mouse, inner_rule
 from backbone.prompt.text import text
-from backbone.prompt.core import C
+from backbone.prompt.core import C, clicked_field, edit_line, field_row_spans, framed_col
 
 
 keys.define("calendar", "Calendar", [
@@ -351,7 +351,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
 
         # Time section
         tpfx = C.BOLD if section == 'time' else C.DIM
-        row = f"  {tpfx}Time{C.RESET}  "
+        pieces = [(None, f"{tpfx}Time{C.RESET}  ")]
         for i, field in enumerate(torder):
             val = "".join(tfields[field])
             pos = tpos[field]
@@ -359,23 +359,23 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                 cell = block_cursor(val, pos)
             else:
                 cell = f"{C.DIM}{val.ljust(tmaxlen[field], '0')}{C.RESET}"
-            row += cell
-            if i == 0:   row += ":"
-            elif i == 1: row += ":"
-            elif i == 2: row += "."
-        lines.append(row)
+            pieces += [(tfields[field], cell), (None, ":" if i < 2 else "." if i == 2 else "")]
+        # boxed_chrome puts body line k on its frame's line k + 1
+        field_row_spans((w.row or 1) + ui.top_margin() + 1 + len(lines), framed_col(), pieces)
+        lines.append("  " + "".join(drawn for _b, drawn in pieces))
 
         h = ""
         if section == 'date':
             if not day_mode:
-                h = [("←→", "month"), ("↑↓", "year"), ("tab/⇧tab", "field"),
-                     ("↵", "save"), ("esc", "back"), (keys.label("list.quit"), "quit app")]
+                h = [(keys.label("calendar.earlier", "calendar.later"), "month"),
+                     (keys.label("calendar.up", "calendar.down"), "year")]
             else:
-                h = [("←→↑↓", "navigate"), ("tab/⇧tab", "field"), ("↵", "save"),
-                     ("esc", "back"), (keys.label("list.quit"), "quit app")]
+                h = [(keys.label("calendar.earlier", "calendar.later", "calendar.up", "calendar.down"), "navigate")]
         elif section == 'time':
-            h = [("←→", "cursor"), ("tab/⇧tab", "field"), ("↵", "save"),
-                 ("esc", "back"), (keys.label("list.quit"), "quit app")]
+            h = [(keys.label("text.left", "text.right"), "cursor")]
+        if h:
+            h += [(keys.label("field.next", "field.prev"), "field"), (keys.label("calendar.save"), "save"),
+                  (keys.label("calendar.back"), "back"), (keys.label("list.quit"), "quit app")]
 
         lines, _dx = boxed_chrome(lines, message, _with_toggle_hint(h), _hint_cells)
         w.render(lines)
@@ -424,16 +424,21 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
 
             if chrome.is_mode_toggle(key):
                 return MODE_TOGGLE  # type: ignore[return-value]
-            if key in ('ESC', 'CTRL_C'):
+            if hit := clicked_field(key, tfields):          # a click in the time: that field, there
+                section, tcursor, tpos[hit[0]] = 'time', torder.index(hit[0]), hit[1]
+                _render()
+                continue
+            if key == 'CTRL_C' or keys.pressed(key, 'calendar.back'):
                 break
             if keys.pressed(key, 'list.quit'):
                 raise QuitToTerminal()   # q quits the app; it never just leaves a widget
 
-            if key == 'ENTER':
+            act = keys.action(key, 'calendar')
+            if act == 'calendar.save':
                 result = _build_result()
                 break
 
-            elif key == 'TAB':
+            elif keys.pressed(key, 'field.next'):
                 if section == 'date':
                     if not day_mode:
                         day_mode = True
@@ -451,7 +456,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                         day_mode = False
                         tcursor = 0
 
-            elif key == 'BACKTAB':
+            elif keys.pressed(key, 'field.prev'):
                 # The same chain backwards: month/year ← day grid ← time fields.
                 if section == 'date':
                     if day_mode:
@@ -467,7 +472,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                         day_mode = True
 
             elif section == 'date':
-                if key == 'RIGHT':
+                if act == 'calendar.later':
                     if not day_mode:
                         month += 1
                         if month > 12: month, year = 1, year + 1
@@ -478,7 +483,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                             month += 1
                             if month > 12: month, year = 1, year + 1
                             cursor_day = 1
-                elif key == 'LEFT':
+                elif act == 'calendar.earlier':
                     if not day_mode:
                         month -= 1
                         if month < 1: month, year = 12, year - 1
@@ -489,7 +494,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                             month -= 1
                             if month < 1: month, year = 12, year - 1
                             cursor_day = _days_in_month(year, month)
-                elif key == 'UP':
+                elif act == 'calendar.up':
                     if not day_mode:
                         year -= 1
                         cursor_day = min(cursor_day, _days_in_month(year, month))
@@ -499,7 +504,7 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                             month -= 1
                             if month < 1: month, year = 12, year - 1
                             cursor_day = _days_in_month(year, month)
-                elif key == 'DOWN':
+                elif act == 'calendar.down':
                     if not day_mode:
                         year += 1
                         cursor_day = min(cursor_day, _days_in_month(year, month))
@@ -516,21 +521,8 @@ def datetime_edit(message: str = "Edit date and time:", initial: str = "") -> st
                 pos   = tpos[cur_f]
                 maxl  = tmaxlen[cur_f]
 
-                if key == 'BACKSPACE':
-                    if pos > 0:
-                        buf.pop(pos - 1)
-                        tpos[cur_f] = pos - 1
-                elif key == 'DELETE':
-                    if pos < len(buf):
-                        buf.pop(pos)
-                elif key == 'LEFT':
-                    tpos[cur_f] = max(0, pos - 1)
-                elif key == 'RIGHT':
-                    tpos[cur_f] = min(len(buf), pos + 1)
-                elif key == 'HOME':
-                    tpos[cur_f] = 0
-                elif key == 'END':
-                    tpos[cur_f] = len(buf)
+                if keys.action(key, 'text'):                 # the caret and deleting: edit_line's
+                    tpos[cur_f] = edit_line(buf, pos, key)
                 elif key.isdigit() and len(buf) < maxl:
                     buf.insert(pos, key)
                     tpos[cur_f] = pos + 1

@@ -1,5 +1,8 @@
 """Themes: every theme fills every role, set_theme paints with it (and keeps
 colour off when it's off), and the terminal's background is read right."""
+import os
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -299,6 +302,15 @@ class WholeAppTest(unittest.TestCase):
         ui._in_app[0] = False
         ui.set_theme("teletext")
         self.assertEqual(self.out.getvalue(), "")
+
+
+class ItalicTest(unittest.TestCase):
+    def test_italic_where_terminfo_has_it_else_underline(self):
+        # A process of its own for each: curses reads terminfo once a process.
+        for term, code in (("xterm-256color", "\033[3m"), ("screen-256color", ui.Colors.UNDERLINE)):
+            got = subprocess.run([sys.executable, "-c", "from backbone import ui; print(ui._italic_code(), end='')"],
+                                 env={**os.environ, "TERM": term}, capture_output=True, text=True).stdout
+            self.assertEqual(got, code, term)
 
 
 if __name__ == "__main__":

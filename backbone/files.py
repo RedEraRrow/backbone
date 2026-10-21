@@ -1,7 +1,25 @@
 """Files: atomic writes and backups, a daemon's timestamped log, free space and folder counts."""
 import os
+import re
 import shutil
 import tempfile
+
+
+_UNSAFE = re.compile(r'[<>"|?*\x00-\x1f]')
+
+
+def safe_filename(name: str, limit: int | None = None) -> str:
+    """`name` as one file or folder name every common filesystem takes: a
+    colon becomes a dash ("Title: Part" -> "Title - Part", "D:Votion" ->
+    "D-Votion"), so does a slash or backslash; the characters Windows refuses
+    go; runs of space close up; no dot or space at either end. At most `limit`
+    characters; "untitled" when nothing is left."""
+    name = re.sub(r'\s*:\s+', ' - ', name)
+    name = _UNSAFE.sub('', re.sub(r'[:/\\]', '-', name))
+    name = re.sub(r'\s+', ' ', name).strip(' .')          # a leading dot would hide it
+    if limit:
+        name = name[:limit].rstrip(' .')
+    return name or 'untitled'
 
 
 def write_text_atomic(path, text: str) -> None:

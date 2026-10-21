@@ -141,6 +141,10 @@ class SectionsTest(unittest.TestCase):
         # Esc leaves B for the titles; Esc there leaves the list
         self.assertIsNone(self.run_(['ESC', 'ESC'], 4, index=6))
 
+    def test_esc_leaves_a_section_where_the_top_has_no_back(self):
+        # B, Esc to the titles (Esc there ignored), up to A, a1
+        self.assertEqual(self.run_(['DOWN', 'ENTER', 'ESC', 'ESC', 'UP', 'ENTER', 'ENTER'], 4, allow_back=False), 'a1')
+
     def test_slash_switches_to_the_whole_list_and_back(self):
         self.assertEqual(self.run_(['/', 'DOWN', 'ENTER'], 4), 'a2')                 # whole list
         self.assertEqual(self.run_(['ENTER'], 4), 'a1')                                # remembered

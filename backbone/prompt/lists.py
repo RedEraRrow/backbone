@@ -13,7 +13,8 @@ from backbone.prompt.core import (
     _read_key, _visible_rows, _cols, _Widget, _hint_pin_target, screen_takeover_next, screen_backdrop,
     Choice, Column, JumpTo, PanelTitle, Trail, border_right, box_fits, box_lines, boxed_frame, column_widths,
     COL_GAP, _COL_MAIN_MIN, _COL_PREVIEW, _LIST_ROWS_MIN, _SHAPE_SAMPLE, _STRIP_SPLIT, strip_rows,
-    columns_shown, help_corner_text, panel_header, rounded_header, set_columns_shown, trail_lines,
+    columns_shown, help_corner_text, panel_header, preview_shown, rounded_header, set_columns_shown,
+    set_preview_shown, trail_lines,
 )
 from backbone import keys, ui
 from backbone.log import quietly
@@ -23,7 +24,7 @@ from backbone.prompt.chrome import (
     append_chrome, boxed_chrome, CHROME_HANDLED, chrome_hint_lines, CHROME_REDRAW, consume_chrome, disable_mouse, enable_mouse, move_hint, _plain,
 )
 from backbone.prompt.core import C
-from backbone.prompt.core import edit_line
+from backbone.prompt.core import caret_span_at, caret_window, edit_line
 
 
 class ListPlace:
@@ -92,7 +93,8 @@ keys.define("list", "Lists", [
     ("sections", ("/",), "a long list's sections, or the whole list"),
     ("row_options", ("o",), "everything you can do with the row"),
     ("list_options", ("O",), "everything you can do with the whole list"),
-    ("columns", ("v",), "side columns on or off, in lists that have them"),
+    ("columns", ("v",), "the levels above as columns, on or off, in lists that have them"),
+    ("preview", ("i",), "the preview of the highlighted row, on or off, in lists that have one"),
 ])
 # The live search lists: typing goes into the query, so their keys are the
 # ones that can't be typed.
@@ -210,7 +212,8 @@ def select(message: str, choices: list, **kw) -> Any:
             rows = sections[titles.index(memo['open'])][1]
             pos = next((i for i, it in enumerate(rows) if not it.disabled and it.value == want), 0)
             res = _select_flat(memo['open'] if not message else f"{message}  {memo['open']}", rows,
-                               **{**_with_toggle(_TO_WHOLE, "whole list"), 'index': pos})
+                               **{**_with_toggle(_TO_WHOLE, "whole list"), 'index': pos,
+                                  'allow_back': True})   # back to the titles, even where the list's top has none
             if res is _TO_WHOLE:
                 memo['whole'], memo['open'] = True, None
                 continue
@@ -220,10 +223,8 @@ def select(message: str, choices: list, **kw) -> Any:
                 continue
             return res
         here = next((t for t, rows in sections if any(it.value == want for it in rows)), want)
-        res = _select_flat(message, [Choice(t, value=t, cells=[t, f"{sum(not it.disabled for it in rows)}"])
-                                     for t, rows in sections],
+        res = _select_flat(message, [Choice(t, value=t) for t in titles],
                            header=kw.get('header'), allow_back=kw.get('allow_back', True),
-                           columns=[Column(style='primary'), Column(style='dynamic-dim', flex=True)],
                            index=titles.index(here) if here in titles else 0,
                            shortcuts={'list.sections': _TO_WHOLE}, extra_hints={'list.sections': "whole list"})
         if res is _TO_WHOLE:
@@ -331,7 +332,8 @@ def _select_flat(message: str, choices: list, *,
         preview:    highlighted row's value → None or a callable (width,
             height) → lines (or a Pane, with pictures) for the last column:
             what the row holds, or its details. column_widths sizes the
-            columns; list.columns (v) turns the browser off and on.
+            columns; list.columns (v) turns the levels' columns off and on,
+            list.preview (i) the preview.
 
     Options menus: list.row_options (o) lists everything that can be done
     with the highlighted row (↵, on_inspect, the row actions that apply),
@@ -448,8 +450,10 @@ def _select_flat(message: str, choices: list, *,
         _opt_hints[L("list.row_options")] = "options"
     if _list_specs or _list_act_specs:
         _opt_hints[L("list.list_options")] = "list options"
-    if trail or preview is not None:
+    if trail:
         _opt_hints[L("list.columns")] = "columns"
+    if preview is not None:
+        _opt_hints[L("list.preview")] = "preview"
     combined_hints = {**{k: v for k, v in combined_hints.items() if k not in base_hints},
                       **_opt_hints, **base_hints}
 
@@ -486,8 +490,8 @@ def _select_flat(message: str, choices: list, *,
     _edit_i     = 0
     _edit_buf: list = []
     _edit_pos   = 0
-    _edit_hints = {row_edit_key: "next", "↑↓": "cycle",
-                   "↵": "set", "esc": "cancel"}
+    _edit_hints = {row_edit_key: "next", L("list.up", "list.down"): "cycle",
+                   L("field.submit"): "set", L("field.cancel"): "cancel"}
     if row_edit is not None:
         combined_hints = {row_edit_key: "edit",
                           **{k: v for k, v in combined_hints.items() if k != row_edit_key}}
@@ -685,11 +689,13 @@ def _select_flat(message: str, choices: list, *,
         # A column browser, when there's room: the levels above and the preview
         # share the box with the list, which gets what's left.
         shown, pw, strip, pview, strip_h = [], 0, False, None, 0
-        if boxed and (trail or preview is not None) and columns_shown() and items:
-            pview = preview(items[cursor].value) if preview is not None else None
+        levels = trail if trail and columns_shown() else []
+        previewing = preview is not None and preview_shown()
+        if boxed and (levels or previewing) and items:
+            pview = preview(items[cursor].value) if previewing else None
             shape = _level_shape()
-            shown, pw, strip = column_widths(_cols(), trail or [], pview,
-                                             shape[0] if preview is not None else None, shape[2])
+            shown, pw, strip = column_widths(_cols(), levels, pview,
+                                             shape[0] if previewing else None, shape[2])
         pw = _clear_of_tab(pw, sum(tw + 3 for _t, tw in shown))
         browser_w = _cols() - (pw + ui.MARGIN_H if pw else 0)       # the browser's box
         main_in = browser_w - 4 - sum(tw + 3 for _t, tw in shown)   # the list's own column
@@ -872,6 +878,12 @@ def _select_flat(message: str, choices: list, *,
         for i, k in row_at.items():
             if first + k < len(out):                 # a row the box had no room for has no text to click
                 _row_line[i] = out[first + k]
+        if _edit_on and _editing_text() and cursor in _row_line and columns and row_edit_col < len(col_widths):
+            # Where the cell's text is, for a click to move its caret (scrolled to it).
+            text, width = "".join(_edit_buf), col_widths[row_edit_col]
+            start = caret_window(len(text) + (_edit_pos >= len(text)), _edit_pos, width)
+            caret_span_at(_edit_buf, _edit_pos, _row_line[cursor], (w.row or 1) + ui.top_margin() + first + row_at[cursor],
+                          start, width)
         # Inset the hint block by the left margin so it never hugs an edge; _hint
         # centres within _cols() (= width-2*MARGIN_H), so this makes it symmetric.
         # Pin the hint bar to the bottom (just above the miniplayer + status) so
@@ -925,16 +937,17 @@ def _select_flat(message: str, choices: list, *,
                 # includes 'q' and the cycle key (an artist name may contain
                 # either). ↑↓ step the cycle, which is also the way back out of
                 # the field and on to the next option.
-                if key == 'ESC':
+                if keys.pressed(key, 'field.cancel'):
                     _edit_on = False
-                elif key == 'ENTER':
+                elif keys.pressed(key, 'field.submit'):
                     chosen = ("".join(_edit_buf) if _editing_text()
                               else _edit_opts[_edit_i]).strip()
                     if chosen and row_edit_commit is not None:
                         row_edit_commit(items[cursor].value, chosen)
                     _edit_on = False
-                elif key in ('UP', 'DOWN') or (key in row_edit_keys and not _editing_text()):
-                    step = -1 if key == 'UP' else 1
+                elif (keys.action(key, 'list') in ('list.up', 'list.down')
+                      or (key in row_edit_keys and not _editing_text())):
+                    step = -1 if keys.pressed(key, 'list.up') else 1
                     was = (_edit_opts[_edit_i] if not _editing_text()
                            else "".join(_edit_buf))
                     _edit_i = (_edit_i + step) % (len(_edit_opts) + 1)
@@ -1065,8 +1078,11 @@ def _select_flat(message: str, choices: list, *,
                     cursor = j
                 _sel_last_click = None
                 w.render(_lines())
-            elif act == 'list.columns' and (trail or preview is not None):
+            elif act == 'list.columns' and trail:
                 set_columns_shown(not columns_shown())
+                _sel_last_click = None; w.anchor_reset(); w.render(_lines())
+            elif act == 'list.preview' and preview is not None:
+                set_preview_shown(not preview_shown())
                 _sel_last_click = None; w.anchor_reset(); w.render(_lines())
             elif shortcuts and key in shortcuts:  result = shortcuts[key]; break
             elif key == 'SCROLL_UP':             cursor = _step(cursor, -1); _sel_last_click = None; w.render(_lines())
@@ -1321,6 +1337,7 @@ def live_select(message: str, provider: Callable[[str], list], *,
             _field = block_cursor(placeholder, 0, base=C.DIM) + C.RESET
         else:
             _field = block_cursor("", 0)
+        q_at = len(out)                             # the query's line, for clicks in it
         out.append(f"  {_label}{_field}")
         count = ("" if not qtext else
                  ui.plural(len(items) if count_of is None else count_of(), "result"))
@@ -1384,6 +1401,8 @@ def live_select(message: str, provider: Callable[[str], list], *,
         for i, k in row_at.items():
             if first + k < len(out):                 # a row the box had no room for has no text to click
                 _row_line[i] = out[first + k]
+        if first + q_at < len(out):
+            caret_span_at(query, qpos, out[first + q_at], (w.row or 1) + ui.top_margin() + first + q_at)
         # Inset the hint block by the left margin so it never hugs an edge; _hint
         # centres within _cols() (= width-2*MARGIN_H), so this makes it symmetric.
         _filler = _hint_pin_target() - len(out) - len(hint_lines)
@@ -1455,6 +1474,9 @@ def live_select(message: str, provider: Callable[[str], list], *,
                 cursor = _step(cursor, -1); _sel_last_click = None; w.render(_lines())
             elif key == 'SCROLL_DOWN':
                 cursor = _step(cursor, 1); _sel_last_click = None; w.render(_lines())
+            elif key.startswith('MOUSE_CLICK:') and (new_pos := edit_line(query, qpos, key)) is not None:
+                qpos = new_pos                    # a click in the query: the caret there
+                w.render(_lines())
             elif key.startswith('MOUSE_CLICK:') and w.row is not None:
                 # Same two-click convention as `select`: a click on a row not
                 # already highlighted moves the cursor there; clicking it again
@@ -1502,24 +1524,11 @@ def live_select(message: str, provider: Callable[[str], list], *,
                         cursor = _step(cursor, 1)
                 _sel_last_click = None
                 w.render(_lines())
-            elif key == 'LEFT':
-                qpos = max(0, qpos - 1); w.render(_lines())
-            elif key == 'RIGHT':
-                qpos = min(len(query), qpos + 1); w.render(_lines())
-            elif key == 'HOME':
-                qpos = 0; w.render(_lines())
-            elif key == 'END':
-                qpos = len(query); w.render(_lines())
-            elif key == 'BACKSPACE':
-                if qpos > 0:
-                    query.pop(qpos - 1); qpos -= 1
-                    _recompute(); w.render(_lines())
-            elif key == 'SPACE':
-                query.insert(qpos, ' '); qpos += 1
-                _recompute(); w.render(_lines())
-            elif len(key) == 1 and key.isprintable():
-                query.insert(qpos, key); qpos += 1
-                _recompute(); w.render(_lines())
+            elif (new_pos := edit_line(query, qpos, key)) is not None:
+                qpos = new_pos
+                if keys.action(key, 'text') not in ('text.left', 'text.right', 'text.home', 'text.end'):
+                    _recompute()                  # the query changed, not just the caret
+                w.render(_lines())
     finally:
         _drop_backdrop()
         disable_mouse()

@@ -16,7 +16,7 @@ from backbone import keys, ui
 from backbone.prompt import chrome
 from backbone.prompt.chrome import CHROME_HANDLED, CHROME_REDRAW, MODE_TOGGLE, boxed_chrome, consume_chrome, disable_mouse, enable_mouse
 from backbone.prompt.core import C
-from backbone.prompt.core import _byte_ready, _hint_pin_target, edit_line
+from backbone.prompt.core import _byte_ready, _hint_pin_target, caret_spans, clicked_field, edit_line, field_row_spans, framed_col
 
 
 def text(message: str, default: str = "", suggest=None, check=None, allow=None,
@@ -85,12 +85,18 @@ def text(message: str, default: str = "", suggest=None, check=None, allow=None,
                 row = f"{value}{' ' * (width - ui.visual_len(value))}{C.DIM}{note}{C.RESET}"
                 body.append("  " + (ui.on_bar(row, content_width) if k == picked[0] else row))
 
-        pairs = [("↵", "save"), ("esc", "back")]
+        pairs = [(keys.label("field.submit"), "save"), (keys.label("field.cancel"), "back")]
         if options:
-            pairs = [("↑↓", "pick"), ("tab", "complete")] + pairs
+            pairs = [(keys.label("field.up", "field.down"), "pick"), (keys.label("field.next"), "complete")] + pairs
         if chrome._value_toggle_enabled:
             pairs.append((keys.label("global.raw_text"), chrome._toggle_hint_label))
         out = field_frame(message, body[:len(rows)], body[len(rows):], pairs, _hint_cells)
+        first = 0
+        spans = []
+        for j, line in enumerate(rows):          # field_frame's field: from its second line
+            spans.append((ui.top_margin() + 2 + j, framed_col(), first, line))
+            first += len(line)
+        caret_spans(buf, spans)
 
         # One diffed frame (no full erase, no newlines): only the rows that
         # actually changed are written, so typing doesn't repaint the screen.
@@ -150,24 +156,24 @@ def text(message: str, default: str = "", suggest=None, check=None, allow=None,
                 chrome._toggle_carry = "".join(buf)
                 return MODE_TOGGLE  # type: ignore[return-value]
             if   key == 'CTRL_C':             result = None;         break
-            elif key == 'ESC':                result = None;         break
-            elif key == 'ENTER' and picked[0] >= 0:
+            elif keys.pressed(key, 'field.cancel'): result = None;      break
+            elif keys.pressed(key, 'field.submit') and picked[0] >= 0:
                 _take(picked[0]); _render()
-            elif key == 'ENTER':
+            elif keys.pressed(key, 'field.submit'):
                 if check and "".join(buf).strip() and check("".join(buf)):
                     tried[0] = True; _render()               # not till it's right
                     continue
                 result = "".join(buf); break
-            elif key == 'TAB' and suggest:
+            elif keys.pressed(key, 'field.next') and suggest:
                 _take(picked[0]); _render()
-            elif key in ('UP', 'DOWN') and _options():
+            elif (keys.pressed(key, 'field.up') or keys.pressed(key, 'field.down')) and _options():
                 # Round the suggestions and back to the field (-1).
                 n = len(_options())
-                picked[0] = (picked[0] + 1 + (1 if key == 'DOWN' else -1)) % (n + 1) - 1
+                picked[0] = (picked[0] + 1 + (1 if keys.pressed(key, 'field.down') else -1)) % (n + 1) - 1
                 _render()
-            elif key == 'UP':
+            elif keys.pressed(key, 'multiline.line_up'):
                 pos = max(0, pos - _cols()); _render()
-            elif key == 'DOWN':
+            elif keys.pressed(key, 'multiline.line_down'):
                 pos = min(len(buf), pos + _cols()); _render()
             else:
                 was = list(buf)
@@ -321,6 +327,8 @@ def overlay_text(message: str, default: str = "", hint: str = "↵ run · esc",
         if not boxed:                               # no room for a box: the field across one row
             lines = [prefix + shown + " " * max(0, inner - ui.visual_len(shown))]
         _overlay_show(place, lines)
+        at = (place['top'] + 1, place['left'] + 2) if boxed else (place['top'], place['left'] + ui.visual_len(prefix))
+        caret_spans(buf, [(*at, start, text[start:start + inner])])
 
     result = None
     _close_layer = overlay_layer()                 # over the screen showing; it meets any size itself
@@ -333,10 +341,10 @@ def overlay_text(message: str, default: str = "", hint: str = "↵ run · esc",
             if not _wait_for_keypress(0.05):
                 continue
             key = _read_key(fd)
-            if key == 'ENTER':
+            if keys.pressed(key, 'field.submit'):
                 result = "".join(buf)
                 break
-            if key in ('ESC', 'CTRL_C'):
+            if key == 'CTRL_C' or keys.pressed(key, 'field.cancel'):
                 break
             new_pos = edit_line(buf, pos, key)
             if new_pos is not None:
@@ -409,13 +417,13 @@ def overlay_checklist(title: str, rows: list, checked: set, actions: list = ()) 
             if not _wait_for_keypress(0.05):
                 continue
             key = _read_key(fd)
-            if key in ('ESC', 'CTRL_C'):
+            if key == 'CTRL_C' or keys.pressed(key, 'list.back'):
                 break
-            if key in ('UP', 'DOWN'):
-                at = live[(live.index(at) + (-1 if key == 'UP' else 1)) % len(live)]
-            elif key in ('SPACE', 'ENTER') and at < len(rows):
+            if keys.pressed(key, 'list.up') or keys.pressed(key, 'list.down'):
+                at = live[(live.index(at) + (-1 if keys.pressed(key, 'list.up') else 1)) % len(live)]
+            elif (keys.pressed(key, 'list.toggle') or keys.pressed(key, 'list.choose')) and at < len(rows):
                 checked ^= {items[at].value}
-            elif key == 'ENTER':
+            elif keys.pressed(key, 'list.choose'):
                 picked = items[at].value
                 break
             _render()
@@ -474,6 +482,7 @@ def path(message: str, default: str = "") -> str | None:
 
         cursor_col = disp_pos
         shown = block_cursor(display, disp_pos)
+        caret_spans(buf, [(ui.top_margin() + 2, framed_col(), pos - max_w + 1 if pos >= max_w else 0, display)])
 
         render_stream = [f"  {shown}"]
         lines_count = 1
@@ -533,7 +542,8 @@ def path(message: str, default: str = "") -> str | None:
         # still rides just under the frame, but the hint bar is pinned above the
         # now-playing box instead of trailing whatever the tooltip left behind.
         body = [ln.replace("\033[K", "") for ln in "".join(render_stream).split("\r\n")]
-        pairs = [("↵", "save"), ("tab/⇧tab", "complete"), ("esc", "back")]
+        pairs = [(keys.label("field.submit"), "save"), (keys.label("field.next", "field.prev"), "complete"),
+                 (keys.label("field.cancel"), "back")]
         out, _dx = boxed_chrome(body, message, pairs, _hint_cells)
 
         # One diffed frame; see text() above.
@@ -565,19 +575,19 @@ def path(message: str, default: str = "") -> str | None:
 
             if key == 'CTRL_C':
                 result = None; break
-            elif key == 'ESC':
+            elif keys.pressed(key, 'field.cancel'):
                 result = None; break
-            elif key == 'ENTER':
+            elif keys.pressed(key, 'field.submit'):
                 result = "".join(buf); break
 
-            elif key in ('TAB', 'BACKTAB'):
+            elif keys.pressed(key, 'field.next') or keys.pressed(key, 'field.prev'):
                 current_text = "".join(buf)
                 stub = os.path.basename(current_text) if (current_text and not current_text.endswith('/')) else ""
 
                 visible_matches = [m for m in _tab_matches if os.path.basename(m.rstrip('/')).startswith(stub)] if stub else _tab_matches
 
                 if visible_matches:
-                    if key == 'BACKTAB':
+                    if keys.pressed(key, 'field.prev'):
                         _tab_index -= 2      # step back past the one just offered
                     completed = visible_matches[_tab_index % len(visible_matches)]
                     if os.path.isdir(completed) and not completed.endswith("/"):
@@ -616,6 +626,12 @@ keys.define("multiline", "Text of several lines", [
     ("find", ("\x06",), "find"),
     ("replace", ("\x12",), "find and replace"),
     ("external", ("\x05",), "open it in the system editor, $EDITOR"),
+    ("newline", ("ENTER",), "a new line; in the find box, the next match (in the replace field, replace it)"),
+    ("line_up", ("UP",), "up a line; in the find box, the previous match"),
+    ("line_down", ("DOWN",), "down a line; in the find box, the next match"),
+    ("page_up", ("PGUP",), "up a page"),
+    ("page_down", ("PGDN",), "down a page"),
+    ("back", ("ESC",), "back; in the find box, close it"),
 ])
 # In the find box: plain text or a pattern (a regular expression), and
 # replacing every match at once.
@@ -730,13 +746,13 @@ def multiline(message: str, default: str = "") -> str | None:
 
     def _pairs() -> list:
         if find is None:
-            return [(L("multiline.save"), "save"), ("esc", "back"), (L("multiline.find"), "find"),
+            return [(L("multiline.save"), "save"), (L("multiline.back"), "back"), (L("multiline.find"), "find"),
                     (L("multiline.replace"), "replace"), (L("multiline.external"), "system editor")]
-        pairs = [("↵ ↓", "next"), ("↑", "previous"),
+        pairs = [(L("multiline.newline", "multiline.line_down"), "next"), (L("multiline.line_up"), "previous"),
                  (L("multiline_find.pattern"), "plain text" if find['regex'] else "pattern")]
         if find['mode'] == "replace":
-            pairs += [("tab", "find / with"), (L("multiline_find.all"), "replace all")]
-        return pairs + [("esc", "close")]
+            pairs += [(L("field.next"), "find / with"), (L("multiline_find.all"), "replace all")]
+        return pairs + [(L("multiline.back"), "close")]
 
     def _found() -> tuple[list, str]:
         """The matches, and what the box says of them."""
@@ -772,6 +788,13 @@ def multiline(message: str, default: str = "") -> str | None:
             row_marks = {i: st for (m, i), st in marks.items() if m == n}
             body.append("  " + num + _styled(lines[n][a:b], a, row_marks, pos if k == at else None))
         body += [""] * (height - len(body)) + box
+        if find is not None:                    # the find box's fields, after its border and a label
+            for k, f in enumerate(['q', 'rep']):
+                if k < len(box) - 2:
+                    field_row_spans(ui.top_margin() + 2 + height + 1 + k, framed_col() + 2,
+                                    [(None, " " * 5), (find[f], "")])
+                else:
+                    caret_spans(find[f], [])      # not shown (finding only): nothing to click
         title = message if len(lines) < 2 else f"{message} · line {line + 1} of {len(lines)}"
         out, dx = boxed_chrome(body, title, pairs, cells)
         place.update(rows=rows, first=ui.top_margin() + 2, left=ui.MARGIN_H + dx + 1 + gw + 1)
@@ -849,7 +872,7 @@ def multiline(message: str, default: str = "") -> str | None:
         nonlocal find
         act = keys.action(key, "multiline_find") or keys.action(key, "multiline")
         f = 'rep' if find['field'] else 'q'
-        if key == "ESC":
+        if act == "multiline.back":
             last.update(q="".join(find['q']), rep="".join(find['rep']), regex=find['regex'])
             find = None
         elif act in ("multiline.find", "multiline.replace"):
@@ -860,13 +883,13 @@ def multiline(message: str, default: str = "") -> str | None:
             _go(0)
         elif act == "multiline_find.all" and find['mode'] == "replace":
             _replace(True)
-        elif key in ("TAB", "BACKTAB") and find['mode'] == "replace":
+        elif (keys.pressed(key, 'field.next') or keys.pressed(key, 'field.prev')) and find['mode'] == "replace":
             find['field'] = 1 - find['field']
-        elif key == "ENTER" and find['field']:
+        elif act == "multiline.newline" and find['field']:
             _replace(False)
-        elif key in ("ENTER", "DOWN"):
+        elif act in ("multiline.newline", "multiline.line_down"):
             _go(1)
-        elif key == "UP":
+        elif act == "multiline.line_up":
             _go(-1)
         else:
             new = edit_line(find[f], find[f + '_pos'], key)
@@ -903,6 +926,9 @@ def multiline(message: str, default: str = "") -> str | None:
             _open_find("replace" if act == "multiline.replace" else "find")
             _go(0)
             return None
+        if find is not None and (hit := clicked_field(key, {'q': find['q'], 'rep': find['rep']})):
+            find['field'], find[hit[0] + '_pos'] = ['q', 'rep'].index(hit[0]), hit[1]
+            return None
         if key.startswith("MOUSE_CLICK:"):
             goal = None
             _b, r, c = (int(x) for x in key.split(":")[1:4])
@@ -913,32 +939,32 @@ def multiline(message: str, default: str = "") -> str | None:
             return None
         if find is not None and _find_key(key):
             return None
-        if key in ("ESC", "CTRL_C"):
+        if key == "CTRL_C" or act == "multiline.back":
             return "leave"
         rows = place.get('rows') or _wrap_rows(lines, _text_width())
         at = _row_of(rows, line, pos)
-        vertical = key in ("UP", "DOWN", "PGUP", "PGDN", "SCROLL_UP", "SCROLL_DOWN")
-        if vertical:
+        page = max(1, _hint_pin_target() - 4)
+        step = {"multiline.line_up": -1, "multiline.line_down": 1, "multiline.page_up": -page,
+                "multiline.page_down": page}.get(act) or {"SCROLL_UP": -3, "SCROLL_DOWN": 3}.get(key)
+        if step:
             if goal is None:
                 n, a, _b = rows[at]
                 goal = ui.visual_len(lines[n][a:pos])
-            step = {"UP": -1, "DOWN": 1, "SCROLL_UP": -3, "SCROLL_DOWN": 3}.get(
-                key, (-1 if key == "PGUP" else 1) * max(1, _hint_pin_target() - 4))
             line, pos = _pos_at(rows, max(0, min(len(rows) - 1, at + step)), goal, lines)
             return None
         goal = None
-        if key == "ENTER":
+        if act == "multiline.newline":
             lines[line:line + 1] = [lines[line][:pos], lines[line][pos:]]
             line, pos = line + 1, 0
-        elif key == "BACKSPACE" and pos == 0 and line > 0:
+        elif keys.pressed(key, 'text.backspace') and pos == 0 and line > 0:
             pos = len(lines[line - 1])
             lines[line - 1:line + 1] = [lines[line - 1] + lines[line]]
             line -= 1
-        elif key == "DELETE" and pos == len(lines[line]) and line + 1 < len(lines):
+        elif keys.pressed(key, 'text.delete') and pos == len(lines[line]) and line + 1 < len(lines):
             lines[line:line + 2] = [lines[line] + lines[line + 1]]
-        elif key == "LEFT" and pos == 0 and line > 0:
+        elif keys.pressed(key, 'text.left') and pos == 0 and line > 0:
             line, pos = line - 1, len(lines[line - 1])
-        elif key == "RIGHT" and pos == len(lines[line]) and line + 1 < len(lines):
+        elif keys.pressed(key, 'text.right') and pos == len(lines[line]) and line + 1 < len(lines):
             line, pos = line + 1, 0
         else:
             buf = list(lines[line])

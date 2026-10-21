@@ -50,6 +50,18 @@ class KeysTest(unittest.TestCase):
         self.assertEqual(keys.conflicts("t_player.next", keys.of("global.next")[0]), ["global.next"])
         self.assertEqual(keys.conflicts("t_lyrics.plus1", "["), [])
 
+    def test_typing_and_tabs_follow_their_rebinding(self):
+        keys.bind("text.left", ("\x02",))                    # Ctrl-B, as in a shell
+        buf = list("abc")
+        self.assertEqual(pc.edit_line(buf, 3, "\x02"), 2)
+        self.assertIsNone(pc.edit_line(buf, 3, "LEFT"))     # no longer bound
+        from backbone import nav
+        keys.bind("tabs.tab_2", ("F7",))
+        with patch.object(nav, "TABS", ["a", "b", "c"]), patch.object(nav, "_active", [0]), \
+             patch.object(nav, "current_tab", lambda: "a"), patch.object(nav, "is_modal", lambda: False):
+            self.assertEqual(nav.tab_for("F7"), 1)
+            self.assertIsNone(nav.tab_for("F2"))
+
     def test_a_broken_file_means_the_defaults_and_unknown_entries_are_kept(self):
         self.file.write_text("{not json")
         self.assertEqual(keys.of("t_player.next"), ("]",))

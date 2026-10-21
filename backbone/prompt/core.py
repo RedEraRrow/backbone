@@ -1407,7 +1407,7 @@ def boxed_frame(h_lines: list[str], body: list[str], title: str, box_h: int,
 _COL_SEP = 3                         # " │ " between columns
 _COL_MAIN_MIN = (20, 36)             # the list's own column: least, and as much as it keeps before others get room
 _COL_PREVIEW = (30, 40)              # the preview's width: least, and most as a share of the window (%)
-_COL_TRAIL = (10, 28)                # each column of a level above
+_COL_TRAIL = (10, 28)                # a level above: least, and as short as a long one is cut before it goes
 _STRIP_ROWS = 4                      # the narrow layout's strip: least
 _LIST_ROWS_MIN = 5                   # the list keeps this many rows (three of its own) beside a strip
 _STRIP_SPLIT = 60                    # a strip this wide shows what the row holds beside its details
@@ -1458,30 +1458,37 @@ def column_widths(total: int, trails: list, preview: Preview | None,
     preview by `want` (the widest any row of the list would like, so it holds
     still as you move; else this preview's), the list by `list_want` (its
     widest row). The list keeps what it needs; the preview goes under it
-    before anything is dropped; levels narrow before the oldest go. Room to
-    spare is shared: the preview gets what it'd like, then the two split the
-    rest evenly, the preview up to its share of the window."""
+    before anything is dropped. The deepest is the widest: the list claims up
+    to half the browser first, and each level is no wider than the one after
+    it; a level that can't have two thirds of its width (or _COL_TRAIL[1])
+    goes, with the older ones, rather than being cut short. Room to spare goes
+    to the list's widest row, then what the preview would like, then the two
+    split the rest, the preview up to its share of the window."""
     natural = (list_want + 6) if list_want else _COL_MAIN_MIN[1]       # its margin and ›
     need = max(_COL_MAIN_MIN[0], min(_COL_MAIN_MIN[1], natural))
     pw = 0
     if preview is not None and total - _COL_PREVIEW[0] - ui.MARGIN_H - 4 >= need:
         pw = _COL_PREVIEW[0]
-    room = total - (pw + ui.MARGIN_H if pw else 0) - 4 - need
+    inside = total - (pw + ui.MARGIN_H if pw else 0) - 4
+    main = max(need, min(natural, inside // 2))
+    room, limit = inside - main, inside
     shown = []
     for t in reversed(trails):
-        tw = min(max(max((ui.visual_len(str(x)) for x in t.labels), default=0) + 3, _COL_TRAIL[0]), _COL_TRAIL[1])
-        if tw + _COL_SEP > room:
-            tw = _COL_TRAIL[0]                    # narrowed, rather than gone
-        if tw + _COL_SEP > room:
+        full = max(max((ui.visual_len(str(x)) for x in t.labels), default=0) + 3, _COL_TRAIL[0])
+        fit = room - _COL_SEP
+        fit = fit if fit <= main else (fit + main) // 2      # wider than the list: the list widens too
+        tw = min(full, limit, fit)
+        if tw < max(_COL_TRAIL[0], min(full * 2 // 3, _COL_TRAIL[1])):     # cut short: it goes
             break
         shown.insert(0, (t, tw))
-        room -= tw + _COL_SEP
+        room -= tw + _COL_SEP + max(0, tw - main)
+        main, limit = max(main, tw), tw
     if pw:
+        room -= min(room, max(0, natural - main))         # the list's widest row first
         grow = min(room, max(0, (preview.want if want is None else want) + 4 - pw))
         pw, room = pw + grow, room - grow
-        # The rest split evenly, a half the list doesn't need (its widest row
-        # fits) going to the preview, up to the preview's share of the window.
-        pw += min(max(room // 2, room - max(0, natural - need)), max(0, total * _COL_PREVIEW[1] // 100 - pw))
+        # The rest split evenly, the preview up to its share of the window.
+        pw = min(pw + room // 2, max(_COL_PREVIEW[0], total * _COL_PREVIEW[1] // 100))
     return shown, pw, preview is not None and preview.details is not None and not pw
 
 
@@ -1519,36 +1526,50 @@ class Pane(list):
         self.pictures = list(pictures)
 
 
-_columns_on: list = [None]  # None until first read
+_shown: dict = {}       # name → on/off, read once from its "<name>_off" file
 
 
-def _columns_off_file():
-    from backbone import app
-    return app.config_dir / "columns_off"
-
-
-def columns_shown() -> bool:
-    """Whether lists that can be a column browser are one (list.columns, v)."""
-    if _columns_on[0] is None:
+def _shown_flag(name: str) -> bool:
+    """A list view switched on (the default) or off, remembered between runs."""
+    if name not in _shown:
+        from backbone import app
         try:
-            _columns_on[0] = not _columns_off_file().exists()
+            _shown[name] = not (app.config_dir / f"{name}_off").exists()
         except Exception:
-            _columns_on[0] = True
-    return _columns_on[0]
+            _shown[name] = True
+    return _shown[name]
 
 
-def set_columns_shown(shown: bool) -> None:
-    """Column browser or the list alone, and remember it."""
-    _columns_on[0] = shown
+def _set_shown_flag(name: str, shown: bool) -> None:
+    _shown[name] = shown
+    from backbone import app
+    f = app.config_dir / f"{name}_off"
     try:
-        f = _columns_off_file()
         if shown:
             f.unlink(missing_ok=True)
         else:
             f.parent.mkdir(parents=True, exist_ok=True)
             f.touch()
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("couldn't remember %s: %s", name, exc)
+
+
+def columns_shown() -> bool:
+    """Whether lists with levels above show them as columns (list.columns, v)."""
+    return _shown_flag("columns")
+
+
+def set_columns_shown(shown: bool) -> None:
+    _set_shown_flag("columns", shown)
+
+
+def preview_shown() -> bool:
+    """Whether lists with a preview of the highlighted row show it (list.preview, i)."""
+    return _shown_flag("preview")
+
+
+def set_preview_shown(shown: bool) -> None:
+    _set_shown_flag("preview", shown)
 
 
 def panel_header(header) -> tuple:
@@ -1949,7 +1970,9 @@ COL_GAP = 3
 class Column:
     """A column spec for a structured select() table (no string parsing).
 
-    style    : 'primary' | 'group' | 'heading' | 'static-dim' | 'dynamic-dim' | 'accent' | 'error' | 'normal'
+    style    : 'primary' | 'group' | 'heading' | 'static-dim' | 'dynamic-dim' | 'release' | 'accent' | 'error' | 'normal'
+               ('release': a release's name beside a row's own, an album's or
+               a book's: dynamic-dim, in italics)
                (a row's None cell is merged into the one before it, which takes
                both columns, its own column's style and left-aligned)
     align    : 'left' | 'right'
@@ -2007,8 +2030,9 @@ def _style_cell(text: str, style: str, is_current: bool) -> str:
         return ""
     if style in ('dim', 'static-dim'):
         return f"{C.DIM}{text}{C.RESET}"
-    if style == 'dynamic-dim':
-        return f"{C.BOLD}{C.DIM}{text}{C.RESET}" if is_current else f"{C.DIM}{text}{C.RESET}"
+    if style in ('dynamic-dim', 'release'):
+        italic = C.ITALIC if style == 'release' else ""
+        return f"{C.BOLD if is_current else ''}{C.DIM}{italic}{text}{C.RESET}"
     if style == 'accent':
         return f"{C.ACCENT}{text}{C.RESET}"
     if style == 'error':
@@ -2026,6 +2050,37 @@ def _style_cell(text: str, style: str, is_current: bool) -> str:
     return text  # 'normal'
 
 
+def caret_window(n: int, caret: int, width: int) -> int:
+    """The first of `n` characters a cell `width` wide shows when it scrolls
+    to keep `caret` in view (_around_caret), a column kept past the caret."""
+    return 0 if n <= width or width < 3 else max(0, min(caret - width + 2, n - width))
+
+
+def _around_caret(segs: list, width: int) -> list:
+    """A cell under edit too long for its `width`, scrolled so its caret (the
+    'cursor' segment) is in view, a dim "…" where text is out of sight on
+    either side; any other cell as it is. Measured in characters, like the
+    text field's own scrolling."""
+    chars = [(ch, s) for t, s in (seg if isinstance(seg, tuple) else (seg, None) for seg in segs)
+             for ch in ui.one_line(str(t))]
+    caret = next((i for i, (_ch, s) in enumerate(chars) if s == 'cursor'), None)
+    if caret is None or len(chars) <= width or width < 3:
+        return segs
+    start = caret_window(len(chars), caret, width)
+    shown = chars[start:start + width]
+    if start:
+        shown[0] = ("…", 'dim')
+    if start + width < len(chars):
+        shown[-1] = ("…", 'dim')
+    out: list = []
+    for ch, s in shown:                                           # back into runs of one style
+        if out and out[-1][1] == s:
+            out[-1] = (out[-1][0] + ch, s)
+        else:
+            out.append((ch, s))
+    return out
+
+
 def _render_cell_segments(cell, style: str, is_current: bool, width: int, align: str,
                           force_dim: bool = False) -> str:
     """Render a cell (plain text or list of styled segments, or a callable
@@ -2033,6 +2088,7 @@ def _render_cell_segments(cell, style: str, is_current: bool, width: int, align:
     if callable(cell):
         cell = cell()
     if isinstance(cell, list):
+        cell = _around_caret(cell, width)
         parts = []
         raw_len = 0
         remaining = width
@@ -2317,24 +2373,145 @@ def _render_table_row(cells: list, columns: list, is_current: bool,
     return left
 
 
+# Typing in any text field: the caret and deleting (characters typed are
+# typed, not bound). Its own group, so a screen's keys never take them.
+keys.define("text", "Text editing", [
+    ("left", ("LEFT",), "caret left"),
+    ("right", ("RIGHT",), "caret right"),
+    ("home", ("HOME",), "caret to the start"),
+    ("end", ("END",), "caret to the end"),
+    ("backspace", ("BACKSPACE",), "delete before the caret"),
+    ("delete", ("DELETE",), "delete after the caret"),
+], within=())
+# A form of fields (times, dates, numbers, ratings, a table's cells): moving
+# between them, stepping a value, and finishing.
+keys.define("field", "Fields", [
+    ("next", ("TAB",), "next field"),
+    ("prev", ("BACKTAB",), "previous field"),
+    ("up", ("UP",), "a value up, or the next suggestion"),
+    ("down", ("DOWN",), "a value down, or the previous suggestion"),
+    ("page_up", ("PGUP",), "a value up by ten"),
+    ("page_down", ("PGDN",), "a value down by ten"),
+    ("lowest", ("HOME",), "a number's lowest value"),
+    ("submit", ("ENTER",), "done: keep it"),
+    ("cancel", ("ESC",), "cancel"),
+], within=())
+
+
+# Where each text field's text was last drawn, for a click in it to move its
+# caret (edit_line): id(buffer) → (the buffer, its spans; see caret_spans).
+_caret_spans: dict = {}
+
+
+def framed_col() -> int:
+    """The screen column where a line in boxed_chrome's frame starts its text
+    (a body line's text after its margin): inside the box's "│ " when there's
+    a box."""
+    return ui.MARGIN_H + (3 if box_fits() else 1)
+
+
+def caret_spans(buf: list, spans: list) -> None:
+    """Record where `buf`'s text is on screen, as it is drawn: one span per row
+    it shows on, (row, column, the index of the first character there, the
+    text shown there), rows and columns counted from 1 as a click reports them."""
+    _caret_spans[id(buf)] = (buf, spans)
+
+
+def _clicked_at(buf: list, key: str) -> tuple[int, int] | None:
+    """Where a click on `buf`'s field lands: (the column its row's text
+    starts at, the caret position: the character under the click, the end of
+    the row past its text); None off the field."""
+    entry = _caret_spans.get(id(buf))
+    try:
+        row, col = (int(x) for x in key.split(":")[2:4])
+    except ValueError:
+        return None
+    if not entry or entry[0] is not buf:
+        return None
+    for r, c, first, shown in entry[1]:
+        if r != row or col < c:
+            continue
+        x, i = c, 0
+        while i < len(shown) and x + ui.char_cols(shown[i]) <= col:
+            x += ui.char_cols(shown[i])
+            i += 1
+        return c, max(0, min(len(buf), first + i))
+    return None
+
+
+def _clicked_pos(buf: list, key: str) -> int | None:
+    """The caret position a click on `buf`'s field asks for, or None."""
+    hit = _clicked_at(buf, key)
+    return hit[1] if hit else None
+
+
+def field_row_spans(row: int, col: int, pieces: list) -> None:
+    """Record the spans of fields laid along one screen row: `pieces` in
+    order, each (its buffer, or None for fixed text; what is drawn there),
+    the first starting at column `col`."""
+    for buf, drawn in pieces:
+        if buf is not None:
+            caret_spans(buf, [(row, col, 0, "".join(buf))])
+        col += ui.visual_len(drawn)
+
+
+def clicked_field(key: str, buffers: dict):
+    """For a form of several text fields, each recorded with caret_spans: the
+    (name, caret position) a click on one of them asks for, else None."""
+    if not key.startswith("MOUSE_CLICK:"):
+        return None
+    # Fields share a row: the click is the one's that starts nearest before it.
+    hits = [(at[0], name, at[1]) for name, buf in buffers.items() if (at := _clicked_at(buf, key))]
+    return max(hits, key=lambda h: h[0])[1:] if hits else None
+
+
+def caret_span_at(buf: list, pos: int, line: str, row: int, first: int = 0,
+                  width: int | None = None) -> None:
+    """Record `buf`'s span from where its caret (the block on `pos`, in reverse
+    video) was drawn in `line`, on screen row `row`: for a field set inside a
+    layout whose columns only the drawing knows. Its text shows from index
+    `first` (where it's scrolled to), `width` characters at most."""
+    x = _caret_col(line)
+    if x is None:
+        return
+    text = "".join(buf)
+    shown = text[first:] if width is None else text[first:first + width]
+    caret_spans(buf, [(row, x - ui.visual_len(text[first:pos]), first, shown)])
+
+
+def _caret_col(line: str) -> int | None:
+    """The screen column (from 1) of the first reverse-video cell in `line`."""
+    col = 1
+    for m in re.finditer(r'(\x1b\[[0-9;?]*[A-Za-z])|(.)', line, re.S):
+        if m.group(1):
+            if m.group(1) == C.INVERT or m.group(1).startswith("\x1b[7"):
+                return col
+        else:
+            col += ui.char_cols(m.group(2))
+    return None
+
+
 def edit_line(buf: list, pos: int, key: str) -> int | None:
     """Apply one line-editing key to `buf` (a list of characters) in place
-    (typing, space, backspace, delete, ←/→, Home/End) and return the caret's new
-    position, or None when `key` isn't one of them. The one editor every text
-    field uses, so a key works the same in each."""
-    if key == 'BACKSPACE':
+    (typing, space, backspace, delete, ←/→, Home/End, a click on its text) and
+    return the caret's new position, or None when `key` isn't one of them. The
+    one editor every text field uses, so a key works the same in each."""
+    if key.startswith("MOUSE_CLICK:"):
+        return _clicked_pos(buf, key)
+    act = keys.action(key, "text")
+    if act == 'text.backspace':
         if pos > 0:
             del buf[pos - 1]; pos -= 1
-    elif key == 'DELETE':
+    elif act == 'text.delete':
         if pos < len(buf):
             del buf[pos]
-    elif key == 'LEFT':
+    elif act == 'text.left':
         pos = max(0, pos - 1)
-    elif key == 'RIGHT':
+    elif act == 'text.right':
         pos = min(len(buf), pos + 1)
-    elif key == 'HOME':
+    elif act == 'text.home':
         pos = 0
-    elif key == 'END':
+    elif act == 'text.end':
         pos = len(buf)
     elif key == 'SPACE' or (len(key) == 1 and key.isprintable()):
         buf.insert(pos, ' ' if key == 'SPACE' else key); pos += 1
